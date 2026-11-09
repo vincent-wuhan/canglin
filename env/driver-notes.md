@@ -12,6 +12,8 @@ canglin POC 测试矩阵实测记录（macOS arm64 / Docker 28.4 colima 后端�
 
 openGauss 初始密码为 `GS_PASSWORD=Canglin@123`（compose 内）；首次进入用 `docker exec -it canglin-opengauss su - omm` 后 `gsql -d postgres`。PG 协议端口对外 5433。
 
+**远程访问（PT8 注意）**：容器 `pg_hba.conf` 实测含 `host all all 0.0.0.0/0 md5`，即宿主机 TCP 5433 可达（nc 验证通过）、md5 认证放行；但 omm 默认禁止远程登录，驱动侧需先 `CREATE USER ... PASSWORD` 或改用镜像已有账号；本机暂无 psql 客户端，驱动连通性测试可在容器内或装 psql 后进行。
+
 ## 镜像拉取（国内网络）
 
 - 直连 Docker Hub 大概率中途 `unexpected EOF`（GFW 干扰），未配 colima mirror。
