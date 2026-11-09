@@ -1,11 +1,11 @@
 workflow: full
-phase: design
+phase: build
 build_mode: null
 build_pause: null
 isolation: null
 verify_mode: null
 base_ref: null
-design_doc: null
+design_doc: docs/superpowers/specs/2026-11-09-poc-technical-validation-design.md
 plan: null
 verify_result: pending
 verification_report: null
@@ -13,3 +13,5 @@ branch_status: pending
 created_at: 2026-11-09
 verified_at: null
 archived: false
+handoff_context: openspec/changes/poc-technical-validation/.comet/handoff/design-context.json
+handoff_hash: ac33622c436794c1475618b60cfa02afb47c0c5d4ea4f18d3acc282baa818180

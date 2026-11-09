@@ -1,0 +1,16 @@
+{
+  "change": "poc-technical-validation",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "ac33622c436794c1475618b60cfa02afb47c0c5d4ea4f18d3acc282baa818180",
+  "files": [
+    { "path": "openspec/changes/poc-technical-validation/proposal.md", "sha256": "820081b241b784f0e0a8bf27b693f74752b4afac27a2a6ef2a9f9bf7fc72db05" },
+    { "path": "openspec/changes/poc-technical-validation/design.md", "sha256": "d1f638adc2dabac40c3df77dc4c4feb7230faf07cbed0a85eaf73b8f3418fd25" },
+    { "path": "openspec/changes/poc-technical-validation/tasks.md", "sha256": "a543e1a6186404babe8f538256d00c6b59eabb2481c7c5e36d97f090ca419426" },
+    { "path": "openspec/changes/poc-technical-validation/specs/desktop-shell/spec.md", "sha256": "6e80433419a6b68eae147a75d354619ddc9442d1f32c7d81d25c6ef7ccd28a98" },
+    { "path": "openspec/changes/poc-technical-validation/specs/driver-connectivity/spec.md", "sha256": "529220581b875d1bf18d520d78453431d508b43e958794394a27b4114fc84276" },
+    { "path": "openspec/changes/poc-technical-validation/specs/sync-kernel/spec.md", "sha256": "0299ad1a3396d18e7293cbc085d172124ccfba7501db05af4cbf329457faaf95" }
+  ]
+}

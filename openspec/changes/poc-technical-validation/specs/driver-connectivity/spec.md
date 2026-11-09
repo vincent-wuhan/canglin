@@ -33,3 +33,10 @@
 #### Scenario: 上层代码驱动无关
 - **WHEN** 用同一上层调用分别访问 MySQL 与 PostgreSQL
 - **THEN** 仅连接参数中的驱动类型标识不同，调用代码完全一致
+
+### Requirement: 连接关闭
+连接 SHALL 支持显式关闭以释放资源，close SHALL 幂等——对已关闭连接再次调用不抛异常。
+
+#### Scenario: 连接关闭幂等
+- **WHEN** 对已建立的连接调用 close 后再次调用 close
+- **THEN** 不抛异常，连接资源已释放
