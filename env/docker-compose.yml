@@ -1,0 +1,49 @@
+# canglin POC 测试矩阵：MySQL 8.4（源）/ PostgreSQL 16（目标）/ openGauss（验证兼容性）
+# 用法：cd env && docker compose up -d
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: canglin-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: canglin123
+      MYSQL_DATABASE: canglin_src
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./init/01-mysql.sql:/docker-entrypoint-initdb.d/01.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pcanglin123"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pg:
+    image: postgres:16
+    container_name: canglin-pg
+    environment:
+      POSTGRES_PASSWORD: canglin123
+      POSTGRES_DB: canglin_src
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init/02-pg.sql:/docker-entrypoint-initdb.d/02.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d canglin_src"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  opengauss:
+    # 7.0.0-RC1（multi-arch，arm64 原生）实测可用；拉取方式与踩坑记录见 env/driver-notes.md
+    image: opengauss/opengauss:7.0.0-RC1
+    container_name: canglin-opengauss
+    environment:
+      GS_PASSWORD: Canglin@123
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "su - omm -c 'gsql -d postgres -c \"select 1\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
