@@ -19,7 +19,7 @@
 
 - [x] 3.1 搭建 kernel/ cjpm workspace：record/channel/spi/job 模块骨架
 - [x] 3.2 实现 Column/Record 中立模型 + 列类型装载单测（四类列含 NULL）
-- [ ] 3.3 实现有界 Channel，单测先行验证满阻塞/空阻塞/不丢不重
+- [x] 3.3 实现有界 Channel，单测先行验证满阻塞/空阻塞/不丢不重
 - [ ] 3.4 实现 Reader/Writer SPI 与内存假实现，验证单侧可替换
 - [ ] 3.5 接通 MySQL Reader 与 PG Writer，跑 1 万行同步：零丢行、零失败行、记录吞吐基线与耗时
 - [ ] 3.6 混入脏行验证：失败行计数、跳过不中断
