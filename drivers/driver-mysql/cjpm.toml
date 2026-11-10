@@ -1,0 +1,21 @@
+[package]
+  cjc-version = "1.0.5"
+  name = "mysql_driver"
+  description = "MySQL adapter (mysqlclient4cj) for the unified driver API"
+  version = "0.1.0"
+  compile-option = ""
+  override-compile-option = ""
+  link-option = ""
+  output-type = "static"
+  src-dir = ""
+  target-dir = ""
+  package-configuration = {}
+
+[dependencies]
+  driver = { path = "../driver-api" }
+  kernel = { path = "../../kernel" }
+  # mysqlclient4cj（Cangjie-SIG）= MariaDB/MySQL 的仓颉 CDBC 驱动。
+  # 取 tag 2.0.2：master 的 cjc-version 要求 1.1.0，本机工具链为 1.1.0-beta.25。
+  # 该依赖的 cjpm.toml 以 ${CANGJIE_STDX_PATH} 引用 stdx 静态库，
+  # 构建前须 export CANGJIE_STDX_PATH=<stdx 发行包>/static/stdx。
+  mariadb = { git = "https://gitcode.com/Cangjie-SIG/mysqlclient4cj.git", tag = "2.0.2" }

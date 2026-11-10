@@ -1,0 +1,4 @@
+version = 0
+
+[requires]
+  mariadb = {git = "https://gitcode.com/Cangjie-SIG/mysqlclient4cj.git", commitId = "09cc30a486212eb2cf4c41d27df078383ee45045", tag = "2.0.2"}

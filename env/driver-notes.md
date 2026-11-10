@@ -66,3 +66,59 @@ x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的
   要打印就自己 `extend X <: ToString`（struct 已验证可行），`ToString` 对 enum 同样可行。
 - **`StringBuilder.append` 返回 Unit，不能链式调用**：`sb.append(a).append(b)` 编译失败，须分行写。
 
+## MySQL 适配器：mysqlclient4cj 接入（PT7 实测，2026-11-11）
+
+### 接入方式与版本
+
+- 社区库：**mysqlclient4cj**（Cangjie-SIG，<https://gitcode.com/Cangjie-SIG/mysqlclient4cj>），
+  即仓颉版 MariaDB/MySQL CDBC 驱动，cjpm 包名 `mariadb`。
+- 版本：**tag 2.0.2**（commit `09cc30a4`）。master 的 `cjc-version` 要求 1.1.0，
+  高于本机工具链 1.1.0-beta.25，故锁 2.0.2。
+- 接入方式：**源码依赖**（中心仓未收录该包），写在 `drivers/driver-mysql/cjpm.toml`：
+  `mariadb = { git = "https://gitcode.com/Cangjie-SIG/mysqlclient4cj.git", tag = "2.0.2" }`；
+  `cjpm.lock` 固定到 commitId。
+- 构建前置：`mariadb` 的 cjpm.toml 用 `${CANGJIE_STDX_PATH}` 引用 stdx 静态库，
+  故构建前必须 `export CANGJIE_STDX_PATH=<stdx 发行包>/static/stdx`
+  （本机：`$HOME/cangjie-stdx/darwin_x86_64_llvm/static/stdx`）。
+  stdx 的 crypto 包运行时还需要 **OpenSSL 3**（`libssl.3.dylib` / `libcrypto.3.dylib`）：
+  本机 macOS 12 只有 OpenSSL 1.1.1 / LibreSSL，缺库时驱动在 `ds.connect()` 处直接 abort
+  （"Check failed: index < funcTableSize"），须自行安装 OpenSSL 3。
+
+### 关键 API（校准结论）
+
+- 驱动实例：包级语句 `DriverManager.register("mariadb", MariaDBDriver())` 完成注册，
+  而 `MariaDBDriver.init()` 是 protected —— 只能 `DriverManager.getDriver("mariadb")` 取用；
+  **必须 import `mariadb.cdbc`** 才会触发该包级注册，否则 getDriver 返回 None。
+- 连接：`drv.open(url, opts)` 要求 URL scheme 为 `mariadb`；参数走 opts（键名 `username` /
+  `password` / `database` / `ssl.mode` / `prepare.mode` 等，常量在 protected package
+  `mariadb.connection` 内，下游只能写字面量）。`ds.connect()` 返回 `std.database.sql.Connection`。
+- 查询：`conn.prepareStatement(sql).query()` → `QueryResult`；`rs.columnInfos` 给出列名与
+  **仓颉类型名**，`rs.getOrNull<T>(index)` 按 T 取值（index 从 1 起）。
+- 元数据：information_schema 查询可用服务端预编译 + 绑定参数
+  （`stmt.set<String>(index, value)`），实测 SCHEMATA / TABLES / COLUMNS 均可用。
+- 异常：驱动的 `mariadb.connection` / `mariadb.protocol` 是 **protected package**，
+  异常类型下游 import 不到 —— 只能按异常**消息**归类到 driver.api 的四类 DbError。
+- 仓颉侧：`import std.database.sql.Connection as SqlConnection` 可给 std 类型起别名，
+  用来避开与 `driver.api.Connection` 的同名冲突。
+
+### 类型口径与映射
+
+- 驱动侧类型名是仓颉类型：Int64 / Float64 / String / DateTime / Array<Byte>。
+  MySQL 协议把 TEXT 与 BLOB 都编码为 0xFC，驱动无法区分，故适配器统一记为 `TEXT`，
+  真正的二进制靠 UTF-8 解码失败识别（保留为字节）。
+- `RawCell` 无日期变体：DATETIME 在适配层以 `yyyy-MM-dd HH:mm:ss` 文本承载，
+  再由 `cell_map.cj` 还原成 `kernel.record.Column.Date`。
+- 结果集列类型名与 information_schema 的 DATA_TYPE 口径对齐
+  （BIGINT / VARCHAR / DOUBLE / TEXT / DATETIME）。
+
+### 环境偏差与坑（必须声明）
+
+- **Docker Desktop 在本机不可用**（引擎启动 panic：`engines/running_engine.go:111`，
+  "no connected VM"）。PT7 的 L2 测试改用**原生 MySQL 8.0.28**（127.0.0.1:3306，
+  root/canglin123，库 canglin_src，按 `env/init/01-mysql.sql` 灌入 10000 行、100 行 NULL note）
+  —— 端点、账号、schema、种子数据与 docker compose 矩阵完全一致，L2 用例**真实执行并通过**，
+  并非跳过。
+- 仓颉 1.1.0-beta.25 **没有 `defer` 语法**（`defer` 未声明），测试里连接在用例末尾显式关闭。
+- cjpm 只对以 `_test.cj` 结尾的文件注入 unittest 宏（`@Assert` / `@Fail`），
+  故计划里的 `src/test/mysql_it.cj` 落为 `src/test/mysql_it_test.cj`。
+
