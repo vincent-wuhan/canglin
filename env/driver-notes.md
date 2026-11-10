@@ -122,3 +122,54 @@ x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的
 - cjpm 只对以 `_test.cj` 结尾的文件注入 unittest 宏（`@Assert` / `@Fail`），
   故计划里的 `src/test/mysql_it.cj` 落为 `src/test/mysql_it_test.cj`。
 
+
+## PT9 错误四分类 + close 幂等（2026-11-11）
+
+### 契约放在 driver-api（两个适配器共用一份口径）
+
+- 新增包 `driver.testkit`（`drivers/driver-api/src/testkit/error_contract.cj`）：
+  - `probeErrorClassification(drv, good, wrongPassword, unreachablePort, unreachableHost, missingTableSql)`
+    → 探测四类错误的归类：错误口令 / 不可达端口 / 不可达主机 / 查询不存在的表。
+    每个字段是 `Option<DbError>`：Some(e)=按预期失败且类别为 e；None=**竟然成功**（契约不成立）。
+  - `probeCloseIdempotency(drv, good)` → 两次 close 是否抛异常、关闭后查询/元数据是否以错误结果返回。
+  - `isAuthFailed` / `isNetworkUnreachable` / `isQueryError` / `isProtocolError` 四个类别判定。
+- 探针只观察适配器给出的 `DbError` **类别**，不判文案——文案→类别的映射仍是各适配器内部的事
+  （issue：按需在适配器内补错误归类映射）。这样 MySQL 与 PG/openGauss 的口径由同一份契约钉住，
+  不会各写一份、各漂移一份。
+- MySQL 侧已实例化并跑通：`drivers/driver-mysql/src/test/mysql_it_test.cj`
+  （`testErrorClassificationAgainstLiveServer` / `testCloseIdempotent`）。
+- **PG/openGauss 侧待接**：模板见本 issue 附件 `pg_contract_test.cj`，
+  落位 `drivers/driver-pg/src/test/pg_contract_test.cj`（包名须 `pg_driver.test`，文件名须以 `_test.cj` 结尾）；
+  若 PT8 的驱动类名不是 `PgDriver`，改掉模板里的三处即可。
+
+### PG 侧归类映射必须覆盖的文案（对照 MySQL 侧 `mysql_driver.classifyDbError`）
+
+| 类别 | 必须能识别的文案 |
+|---|---|
+| AuthFailed | `password authentication failed` / `authentication failed` / `invalid password` / `role "..." does not exist` |
+| NetworkUnreachable | `connection refused` / `connection timed out` / `timeout` / `could not connect` / `no route to host` / `name or service not known` / `nodename nor servname` / `failed to resolve` |
+| QueryError | `does not exist` / `relation "..." does not exist` / `syntax error` / `permission denied for table` |
+| ProtocolError | 其余（握手/报文格式等） |
+
+### MySQL 侧本次补的归类缺口（PT9 实测）
+
+- **域名解析失败原先落 ProtocolError**：驱动报 `Failed to resolve address no-such-host.invalid.`，
+  既不含 "connection refused" 也不含 "failed to connect"，于是一律掉进 ProtocolError。
+  spec 的「不可达主机」要求它归 NetworkUnreachable——已补 `failed to resolve` / `resolve address` /
+  `name resolution` / `unknown host` / `nodename nor servname` 关键字。
+  （TDD 红→绿：`testErrorClassificationAgainstLiveServer` 先 FAILED 后 PASSED。）
+- 另补 `not allowed to connect` → AuthFailed（服务端拒绝来源主机访问属账号被拒，不是协议问题）。
+
+### PG 侧当前的环境阻塞（PT9 实测，交接给 PT8）
+
+- **opengauss-driver 编译不过**：master 分支依赖 `stdx.net.tls.common`，
+  而本机只有 stdx **1.0.0.1**（`~/cangjie-stdx/darwin_x86_64_llvm`，只有 `stdx.net.tls`）——
+  `cjpm build` 报 `can not find the following dependencies: stdx.net.tls.common`。
+  换 0.60.5 分支则因该分支 `cjc-version = "0.53.4"`（旧依赖解析模式），
+  要求在消费方 cjpm.toml 里显式声明 stdx.log / stdx.crypto.crypto / stdx.encoding.url / stdx.encoding.hex，
+  而 stdx 发行包是 .cjo/.a 形态，不是可直接 path 依赖的源码包——需换 stdx 版本或 fork 驱动。
+  **要拿到含 `stdx.net.tls.common` 的 stdx，得走官网交互式下载（本机无 Playwright 自动化账号链路）。**
+- **openGauss 端点（5433）本机起不来**：Docker Desktop 引擎在本机恒为 stopped
+  （`docker desktop status` → stopped，API 报 500 "no connected VM"），
+  compose 的三容器矩阵跑不起来；PG 5432 可用 brew 原生 PostgreSQL 13.1 顶替，
+  但 openGauss 没有原生替代。

@@ -2,6 +2,7 @@ package mysql_driver.test
 
 import std.unittest.*
 import driver.api.*
+import driver.testkit.*
 import kernel.record.*
 import mysql_driver.*
 
@@ -19,6 +20,9 @@ const MYSQL_SCHEMA = "canglin_src"
 const MYSQL_USER = "root"
 const MYSQL_PASSWORD = "canglin123"
 const MYSQL_TABLE = "src_users"
+// 保留域名（RFC 2606 .invalid 永不可解析）——用于「不可达主机」场景，
+// 解析立即失败，不会像不可路由 IP 那样等 TCP 超时。
+const UNRESOLVABLE_HOST = "no-such-host.invalid"
 
 func mysqlConfig(): ConnConfig {
     return ConnConfig("mysql", MYSQL_HOST, MYSQL_PORT, MYSQL_SCHEMA, MYSQL_USER, MYSQL_PASSWORD)
@@ -38,33 +42,8 @@ func queryOrFail(conn: Connection, sql: String): RowSet {
     }
 }
 
-func isAuthFailed(e: DbError): Bool {
-    return match (e) {
-        case AuthFailed(_) => true
-        case _ => false
-    }
-}
-
-func isNetworkUnreachable(e: DbError): Bool {
-    return match (e) {
-        case NetworkUnreachable(_) => true
-        case _ => false
-    }
-}
-
-func isQueryError(e: DbError): Bool {
-    return match (e) {
-        case QueryError(_) => true
-        case _ => false
-    }
-}
-
-func isProtocolError(e: DbError): Bool {
-    return match (e) {
-        case ProtocolError(_) => true
-        case _ => false
-    }
-}
+// 错误类别的四个判定来自 driver.testkit（与 PG 适配器共用同一口径），
+// 本文件不再自带副本，避免两份实现各自漂移。
 
 // ---- 建连 / 查询（L2） ----
 
@@ -270,48 +249,58 @@ func testErrorClassificationByMessage() {
     @Assert(isAuthFailed(classifyDbError("Access denied for user 'root'@'localhost' (using password: YES)")))
     @Assert(isNetworkUnreachable(classifyDbError("Failed to connect 61: Connection refused.")))
     @Assert(isNetworkUnreachable(classifyDbError("connect timeout")))
+    // 域名解析失败同属网络不可达（PT9 补：原先误落 ProtocolError）
+    @Assert(isNetworkUnreachable(classifyDbError("Failed to resolve address no-such-host.invalid.")))
     @Assert(isQueryError(classifyDbError("Table 'canglin_src.no_such_table_xyz' doesn't exist, errorCode: 0")))
     @Assert(isProtocolError(classifyDbError("unexpected packet sequence")))
 }
 
 @Test
 func testErrorClassificationAgainstLiveServer() {
-    // 错误口令 → AuthFailed
-    let badAuth = ConnConfig("mysql", MYSQL_HOST, MYSQL_PORT, MYSQL_SCHEMA, MYSQL_USER, "wrong-password")
-    match (MysqlDriver().connect(badAuth)) {
-        case Ok(_) => @Fail("错误口令不应建连成功")
-        case Err(e) => @Assert(isAuthFailed(e))
-    }
+    // 走 driver.testkit 的驱动无关契约探针：与 PG 适配器同一份断言口径。
+    let report = probeErrorClassification(
+        MysqlDriver(),
+        mysqlConfig(),
+        // 错误口令 → AuthFailed
+        ConnConfig("mysql", MYSQL_HOST, MYSQL_PORT, MYSQL_SCHEMA, MYSQL_USER, "wrong-password"),
+        // 不可达端口（本地无人监听）→ NetworkUnreachable
+        ConnConfig("mysql", MYSQL_HOST, 59999u16, MYSQL_SCHEMA, MYSQL_USER, MYSQL_PASSWORD),
+        // 不可达主机（域名解析失败）→ NetworkUnreachable
+        ConnConfig("mysql", UNRESOLVABLE_HOST, MYSQL_PORT, MYSQL_SCHEMA, MYSQL_USER, MYSQL_PASSWORD),
+        // 不存在的表 → QueryError
+        "SELECT * FROM no_such_table_xyz"
+    )
+    @Assert(report.connected)
 
-    // 不可达端口 → NetworkUnreachable
-    let unreachable = ConnConfig("mysql", MYSQL_HOST, 59999u16, MYSQL_SCHEMA, MYSQL_USER, MYSQL_PASSWORD)
-    match (MysqlDriver().connect(unreachable)) {
-        case Ok(_) => @Fail("不可达端口不应建连成功")
-        case Err(e) => @Assert(isNetworkUnreachable(e))
+    match (report.wrongPassword) {
+        case Some(e) => @Assert(isAuthFailed(e))
+        case None => @Fail("错误口令不应建连成功")
     }
-
-    // SQL 错误 → QueryError
-    let conn = connectOrFail()
-    match (conn.query("SELECT * FROM no_such_table_xyz")) {
-        case Ok(_) => @Fail("不存在的表不应查询成功")
-        case Err(e) => @Assert(isQueryError(e))
+    match (report.unreachablePort) {
+        case Some(e) => @Assert(isNetworkUnreachable(e))
+        case None => @Fail("不可达端口不应建连成功")
     }
-
-    conn.close()
+    match (report.unreachableHost) {
+        case Some(e) => @Assert(isNetworkUnreachable(e))
+        case None => @Fail("不可达主机不应建连成功")
+    }
+    match (report.missingTable) {
+        case Some(e) => @Assert(isQueryError(e))
+        case None => @Fail("不存在的表不应查询成功")
+    }
 }
 
 // ---- 关闭幂等 ----
 
 @Test
 func testCloseIdempotent() {
-    let conn = connectOrFail()
-    conn.close()
-    conn.close()
-    // 关闭后再查询：返回失败结果，不抛裸异常
-    match (conn.query("SELECT 1")) {
-        case Ok(_) => @Fail("连接关闭后不应查询成功")
-        case Err(_) => @Assert(true)
-    }
+    let report = probeCloseIdempotency(MysqlDriver(), mysqlConfig())
+    @Assert(report.connected)
+    @Assert(!report.firstCloseThrew)
+    @Assert(!report.secondCloseThrew)
+    // 关闭后连接以错误结果回应，而不是抛异常或返回成功
+    @Assert(report.queryAfterCloseFailed)
+    @Assert(report.metadataAfterCloseFailed)
 }
 
 // ---- 口令脱敏 ----

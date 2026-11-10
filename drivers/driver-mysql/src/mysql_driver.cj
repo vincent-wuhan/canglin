@@ -232,18 +232,24 @@ private func isTextType(typeName: String): Bool {
 /// mysqlclient4cj 的异常类型在 protected package 里，下游无法 import，
 /// 故按消息关键字归类：
 /// - 认证（口令/账号被拒）→ AuthFailed
-/// - 网络（不可达/超时/连接被拒）→ NetworkUnreachable
+/// - 网络（不可达/超时/连接被拒/域名解析失败）→ NetworkUnreachable
 /// - SQL（表不存在/语法错/服务端错误码）→ QueryError
 /// - 其余（报文格式、协议不兼容等）→ ProtocolError
 public func classifyDbError(message: String): DbError {
     let m = message.toAsciiLower()
     if (m.contains("access denied") || m.contains("authentication") || m.contains("auth failed") ||
-        m.contains("password") || m.contains("command denied")) {
+        m.contains("password") || m.contains("command denied") ||
+        // 服务端拒绝该来源主机访问（账号/来源被拒，属认证类而非协议类）
+        m.contains("not allowed to connect")) {
         return DbError.AuthFailed(message)
     }
     if (m.contains("connection refused") || m.contains("failed to connect") || m.contains("timed out") ||
         m.contains("timeout") || m.contains("unreachable") || m.contains("no route to host") ||
-        m.contains("connection reset") || m.contains("broken pipe")) {
+        m.contains("connection reset") || m.contains("broken pipe") ||
+        // 域名解析失败：驱动报 "Failed to resolve address <host>."，同属网络不可达
+        m.contains("failed to resolve") || m.contains("resolve address") ||
+        m.contains("name resolution") || m.contains("unknown host") ||
+        m.contains("nodename nor servname")) {
         return DbError.NetworkUnreachable(message)
     }
     if (m.contains("doesn't exist") || m.contains("does not exist") || m.contains("unknown column") ||

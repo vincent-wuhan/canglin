@@ -1,6 +1,7 @@
 package driver.test
 
 import driver.api.*
+import driver.testkit.*
 import std.unittest.*
 
 // 内存假连接 / 假驱动：验证 Connection / DbDriver 接口可被实现，
@@ -13,6 +14,10 @@ class FakeConnection <: Connection {
     public func query(sql: String): Result<RowSet, DbError> {
         if (closed) {
             return Err(DbError.QueryError("connection closed: ${sql}"))
+        }
+        // 假实现里对「不存在的表」返回查询错误，供契约探针覆盖 QueryError 分支
+        if (sql.contains("no_such_table")) {
+            return Err(DbError.QueryError("Table 'canglin_src.no_such_table' doesn't exist"))
         }
         let columns = [ColumnDef("id", "BIGINT"), ColumnDef("name", "VARCHAR")]
         let rows = [[RawCell.I64(1), RawCell.S("alice")]]
@@ -54,6 +59,9 @@ class FakeDriver <: DbDriver {
     public func connect(cfg: ConnConfig): Result<Connection, DbError> {
         if (cfg.port == 59999u16) {
             return Err(DbError.NetworkUnreachable("connect refused"))
+        }
+        if (cfg.host == "no-such-host.invalid") {
+            return Err(DbError.NetworkUnreachable("Failed to resolve address no-such-host.invalid."))
         }
         if (cfg.password == "wrong") {
             return Err(DbError.AuthFailed("access denied"))
@@ -215,4 +223,104 @@ func testDbDriverContractAndErrorCategories() {
             case _ => @Fail("expected AuthFailed, got ${e}")
         }
     }
+}
+
+// ---- 契约探针自身（PT9）：用假驱动验证 probe 的判定逻辑 ----
+// 真实适配器的探针用例在各自模块内（driver-mysql / driver-pg），
+// 这里只保证探针本身可靠：拿到正确的 DbError 时能判出正确类别，
+// 且操作「意外成功」时能报出来（None）。
+
+@Test
+func testErrorContractProbeAgainstFakeDriver() {
+    let report = probeErrorClassification(
+        FakeDriver(),
+        ConnConfig("mysql", "127.0.0.1", 3306u16, "canglin_src", "root", "canglin123"),
+        ConnConfig("mysql", "127.0.0.1", 3306u16, "canglin_src", "root", "wrong"),
+        ConnConfig("mysql", "127.0.0.1", 59999u16, "canglin_src", "root", "canglin123"),
+        ConnConfig("mysql", "no-such-host.invalid", 3306u16, "canglin_src", "root", "canglin123"),
+        "SELECT * FROM no_such_table_xyz"
+    )
+
+    @Assert(report.connected)
+    match (report.wrongPassword) {
+        case Some(e) => @Assert(isAuthFailed(e))
+        case None => @Fail("错误口令不应建连成功")
+    }
+    match (report.unreachablePort) {
+        case Some(e) => @Assert(isNetworkUnreachable(e))
+        case None => @Fail("不可达端口不应建连成功")
+    }
+    match (report.unreachableHost) {
+        case Some(e) => @Assert(isNetworkUnreachable(e))
+        case None => @Fail("不可达主机不应建连成功")
+    }
+    match (report.missingTable) {
+        case Some(e) => @Assert(isQueryError(e))
+        case None => @Fail("不存在的表不应查询成功")
+    }
+}
+
+@Test
+func testCloseIdempotencyProbeAgainstFakeDriver() {
+    let report = probeCloseIdempotency(
+        FakeDriver(),
+        ConnConfig("mysql", "127.0.0.1", 3306u16, "canglin_src", "root", "canglin123")
+    )
+
+    @Assert(report.connected)
+    @Assert(!report.firstCloseThrew)
+    @Assert(!report.secondCloseThrew)
+    @Assert(report.queryAfterCloseFailed)
+    @Assert(report.metadataAfterCloseFailed)
+}
+
+@Test
+func testErrorContractProbeReportsUnexpectedSuccess() {
+    // 假驱动「一切正常」时：探针必须把三处失败都报成 None（None = 竟然成功），
+    // 否则契约用例会误判为通过。
+    let report = probeErrorClassification(
+        AlwaysOkDriver(),
+        ConnConfig("mysql", "127.0.0.1", 3306u16, "canglin_src", "root", "canglin123"),
+        ConnConfig("mysql", "127.0.0.1", 3306u16, "canglin_src", "root", "wrong"),
+        ConnConfig("mysql", "127.0.0.1", 59999u16, "canglin_src", "root", "canglin123"),
+        ConnConfig("mysql", "no-such-host.invalid", 3306u16, "canglin_src", "root", "canglin123"),
+        "SELECT * FROM no_such_table_xyz"
+    )
+
+    @Assert(report.connected)
+    @Assert(report.wrongPassword.isNone())
+    @Assert(report.unreachablePort.isNone())
+    @Assert(report.unreachableHost.isNone())
+    @Assert(report.missingTable.isNone())
+}
+
+/// 总是建连成功、查询也成功的假驱动——用于验证探针能识别「意外成功」。
+class AlwaysOkDriver <: DbDriver {
+    public func connect(cfg: ConnConfig): Result<Connection, DbError> {
+        let conn: Connection = AlwaysOkConnection()
+        return Ok(conn)
+    }
+}
+
+/// 一切都成功的假连接：查询不报错，也不区分表是否存在。
+class AlwaysOkConnection <: Connection {
+    public func query(sql: String): Result<RowSet, DbError> {
+        let columns = [ColumnDef("id", "BIGINT")]
+        let rows = [[RawCell.I64(1)]]
+        return Ok(RowSet(columns, rows))
+    }
+
+    public func listSchemas(): Result<Array<String>, DbError> {
+        return Ok(["canglin_src"])
+    }
+
+    public func listTables(schema: String): Result<Array<String>, DbError> {
+        return Ok(["src_users"])
+    }
+
+    public func tableColumns(schema: String, table: String): Result<Array<ColumnDef>, DbError> {
+        return Ok([ColumnDef("id", "BIGINT")])
+    }
+
+    public func close(): Unit {}
 }
