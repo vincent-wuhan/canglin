@@ -77,6 +77,14 @@ func testCloseDeliversEof() {
 }
 
 @Test
+func testCloseIsIdempotent() {
+    let ch = BoundedChannel(2)
+    ch.close()
+    ch.close() // 重复 close 安全：幂等，不抛错不破坏状态
+    @Assert(isEof(ch.recv())) // recv → None（EOF）
+}
+
+@Test
 func testNoLossNoDuplication() {
     let n = 100
     let ch = BoundedChannel(8) // 容量 < 总数：反复触发背压与唤醒

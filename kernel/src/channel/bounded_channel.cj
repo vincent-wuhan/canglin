@@ -14,6 +14,8 @@ package kernel.channel
 //     lock()/unlock() + 持锁调 newCondition(): ConditionID，
 //     wait(cid)/notifyAll(cid)（无 notifyOne），Mesa 语义，wait 释放锁。
 //   - spawn 返回 Future<T>，f.get() 阻塞取结果。
+//
+// TODO: 多生产/消费场景 notifyAll 有惊群开销，Phase 2 作业分片前评估
 
 import kernel.record.Record
 import std.collection.*
@@ -22,8 +24,9 @@ import std.sync.*
 /// close 后调用 send 抛出的异常。
 /// 行为选择（spec 允许「抛异常或返回错误」二选一）：选抛异常。
 /// 理由：send 的正常返回类型是 Unit，若改为 Result 会把「写已关闭管道」这种
-/// 协议违规强加到所有正常调用点上（PT5 JobRunner 的 writer 循环里 send 只
-/// 发生在 close 之前）。close 后 send 属于编程错误，应 fail-fast。
+/// 协议违规强加到所有正常调用点上（send 由生产方调用——SPI 中即 Reader；
+/// PT5 JobRunner 的 reader 循环里 send 只发生在 close 之前）。close 后
+/// send 属于编程错误，应 fail-fast。
 public class ChannelClosedException <: Exception {
     public init() {
         super("send on closed channel")
@@ -33,6 +36,8 @@ public class ChannelClosedException <: Exception {
 /// 有界 Channel：容量固定，多协程安全。
 /// 实现：MultiConditionMonitor（互斥 + 双条件变量 notFull/notEmpty）
 /// 守护 ArrayList 缓冲；closed 标志实现 EOF 语义。
+/// close 幂等：重复调用安全（实现为重复置位 + 重复广播），
+/// PT5 JobRunner 的 finally 兜底 close 依赖此保证。
 public class BoundedChannel {
     private let capacity: Int64
     private let mon: MultiConditionMonitor
@@ -82,6 +87,7 @@ public class BoundedChannel {
             if (buf.size == 0) {
                 return None // closed && 空 → EOF；close 前不会走到这里
             }
+            // TODO: O(n) 搬移，PT7 万行吞吐基线出来后决定是否换环形缓冲
             let rec = buf.remove(at: 0)
             mon.notifyAll(notFull)
             return Some(rec)
@@ -90,13 +96,14 @@ public class BoundedChannel {
         }
     }
 
-    /// 关闭管道。Reader 取完残留行后 recv 返回 None；此后 send 抛异常。
+    /// 关闭管道。由生产方（SPI Reader）在产出完毕后调用；消费方（SPI Writer）
+    /// 持续 recv，残留行取尽后返回 None 即退出信号；此后 send 抛异常。
     public func close(): Unit {
         mon.lock()
         try {
             closed = true
-            mon.notifyAll(notEmpty) // 唤醒阻塞的 reader → 重新检查后返回 EOF
-            mon.notifyAll(notFull) // 唤醒阻塞的 writer → 重新检查后抛错
+            mon.notifyAll(notEmpty) // 唤醒阻塞在 recv 的消费方（SPI Writer）→ 重新检查后返回 EOF
+            mon.notifyAll(notFull) // 唤醒阻塞在 send 的生产方（SPI Reader）→ 重新检查后抛错
         } finally {
             mon.unlock()
         }
