@@ -1,0 +1,4 @@
+version = 0
+
+[requires]
+  "cangjie_tpc::opengauss" = {git = "https://gitcode.com/Cangjie-TPC/opengauss-driver.git", commitId = "169813b42fe2b8342e72b022ad0f19c4d3aa89bc", branch = "master"}

@@ -173,3 +173,105 @@ x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的
   （`docker desktop status` → stopped，API 报 500 "no connected VM"），
   compose 的三容器矩阵跑不起来；PG 5432 可用 brew 原生 PostgreSQL 13.1 顶替，
   但 openGauss 没有原生替代。
+
+## PG/openGauss 适配器：opengauss-driver 接入（PT8 实测，2026-11-11）
+
+### 接入方式与版本
+
+- 社区库：**opengauss-driver**（Cangjie-TPC，<https://gitcode.com/Cangjie-TPC/opengauss-driver>）。
+  上游对 PostgreSQL 与 openGauss **共用一套 PG 线协议实现**，差异只在启动握手
+  （`DBType.Postgres` / `DBType.OpenGauss`）——故本仓一个适配器同时承载两个端点，
+  由 `cfg.driver`（`pg` / `postgres` / `opengauss`）决定注册名，进而决定握手分支。
+- 版本：**master 分支 commit `169813b`**（"!34 merge master into master"）。
+  cjpm 包名 `cangjie_tpc::opengauss`（上游 `organization = "cangjie_tpc"` + `name = "opengauss"`）。
+- 接入方式：**源码依赖**（中心仓未收录该包），写在 `drivers/driver-pg/cjpm.toml`：
+  `"cangjie_tpc::opengauss" = { git = "https://gitcode.com/Cangjie-TPC/opengauss-driver.git", branch = "master" }`。
+  依赖键必须写**带 organization 前缀**的限定名，只写 `opengauss` 会被 cjpm 判为非法依赖名。
+- 上游 cjpm.toml **没有 `[dependencies]`**，stdx 靠环境变量注入：
+  `[target.x86_64-apple-darwin.bin-dependencies] path-option = ["${CANGJIE_STDX_PATH}"]`。
+- **stdx 版本**（PT9 交接的阻塞已解）：上游 master 依赖 `stdx.net.tls.common`，
+  本机 stdx **1.0.0.1** 发行包（`~/cangjie-stdx/darwin_x86_64_llvm`）没有该包。
+  改用**中心仓 stdx 1.2.0 预编译包**（`~/.cjpm/repository/source/default/stdx-1.2.0/target/darwin_x86_64_cjnative/static`，
+  其 package.json 标 `cjc_version = 1.1.0-beta.25`，与本机工具链同源，含 `stdx.net.tls.common`）。
+  构建前置：
+
+  ```bash
+  STDX=$HOME/.cjpm/repository/source/default/stdx-1.2.0/target/darwin_x86_64_cjnative/static
+  export CANGJIE_PACKAGE_PATH=$STDX
+  export CANGJIE_STDX_PATH=$STDX/stdx
+  export LIBRARY_PATH=$HOME/openssl3/lib
+  export DYLD_LIBRARY_PATH=$HOME/openssl3/lib
+  source ~/cangjie-sdk/envsetup.sh
+  cd drivers/driver-pg && cjpm test
+  ```
+
+  注意 **MySQL 适配器用的是 stdx 1.0.0.1 发行包**（PT7 记录），两者不冲突：各自进程按
+  `CANGJIE_PACKAGE_PATH` 解析，互不干扰。
+
+### 上游缺陷与本地补丁（`env/patch-opengauss-driver.sh`，8 处，幂等可重放）
+
+上游仓库未修复且未发版，cjpm 拉到的是源码缓存（`~/.cjpm/git/cangjie_tpc::opengauss/<commit>/`），
+故就地打补丁。脚本对每处补丁带独立标记，重复执行只报 `[skip]`，缓存被重新拉取后重跑即可恢复。
+
+| 补丁 | 位置 | 上游现象 | 处理 |
+|---|---|---|---|
+| 1 | `src/main_test.cj` | 声明 `package opengauss`，与 organization 推出的 `cangjie_tpc::opengauss` 不符 | 补齐前缀，否则 `cjpm test` 直接报 "the package name in ... is wrong" 并中止 |
+| 2 | `cjpm.toml` | `output-type = "dynamic"`：包初始化早于 stdx.serialization，unittest 可执行文件启动即 SIGABRT（"funcTable is nullptr"） | 改 `static`，包初始化随静态初始化链执行 |
+| 3a | `src/proto3/notice_response.cj` | `serialize()` 用 `field<HashMap<UInt8, String>>`，stdx 要求键为 String，服务端回一条 NOTICE（如 `DROP TABLE IF EXISTS` 命中不存在的表）即抛 `DataModelException("This data is not String.")` | 改 `field<String>("params", params.toString())`（与上游 ErrorResponse 的既有修法一致） |
+| 3b | 同上 | `deserialize()` 还原 params | 停用还原（序列化时已退化为字符串） |
+| 4 | `src/pgconn/config.cj` | `Config.toString()` 插值 `params`（HashMap）：stdx 的 HashMap 序列化扩展要求运行时实现 `std.core:Collection<Tuple<K,V>>`，SDK 1.1.0-beta.25 的 std HashMap 不满足，**插值即 SIGABRT**（`expected interface std.core:Collection<Tuple<String,String>> is not in class std.collection:HashMap<String,String>`），unittest 二进制启动即挂 | 改输出 `params.size`；顺带把口令换成固定掩码 |
+| 5a/5b/5c | `src/driver/driver.cj` | 建连 DEBUG 日志与 URL 解析失败异常带完整连接串（**含口令明文**），违反 spec「密码不得写入日志」 | 新增 `maskConnStrPassword()`，把 userinfo 中的口令段落替换为 `***` |
+
+### 类型口径与映射
+
+- 上游 `oid2typename` 把 **oid 25(text) 与 1043(varchar) 统一归为 `SqlVarchar`**，
+  未知 oid 一律回落 `SqlVarchar`——故 `query()` 路径下 TEXT 列的类型名显示为 `VARCHAR`，
+  数组类型名形如 `Array<SqlBigInt>`。
+  **精确类型以 `tableColumns()`（information_schema）为准**，两条路径口径差异已在测试中显式标注。
+- `RawCell` 取值：布尔 → `I64(0/1)`；整型 → `I64`；real/double/decimal → `F64`；
+  varbinary → `B`；其余（含日期时间）→ `S`（ISO 文本）；NULL → `N`。
+- DDL/DML 也走 `query()`：上游 `simpleExec` 对无 RowDescription 的命令返回空列集，不影响调用方。
+- 数组类型名还原：上游类型名 `Array<SqlXxx>` 的元素部分自下标 6 起、末尾 `>` 独占一位，
+  仓颉切片右端**开区间**，故取 `[6, size - 1)`。
+
+### 连接与协议
+
+- URL 形态：`postgres://user:pass@host:port/db?sslmode=disable&connection_timeout=5000&read_timeout=30000`；
+  openGauss 用 `opengauss://` scheme。口令按 RFC 3986 未保留字符集逐字节百分号编码。
+- 上游 URL 解析器**只对 password 解码**，username 原样取用 → 账号需为不含保留字符的普通账号。
+- **`sslmode=prefer` 在服务端拒绝 TLS 时不会回落到明文**（直接抛 "server refused TLS connection"），
+  故 POC 显式 `sslmode=disable`；生产化需改 `verify-full` 并配置证书。
+- 上游把连接串与 `Config` 打到 DEBUG 日志——补丁 4/5 后不再带口令。
+
+### 测试布局（同一测试函数跑双端点）
+
+- `drivers/driver-pg/src/test/pg_it_test.cj`：`testPgAndOpenGaussEndpoints` **一个测试函数**，
+  用同一份端点无关用例体（`runEndpointSuite` → `runSuiteOn`）依次跑
+  **PostgreSQL(5432)** 与 **openGauss(5433)**——两个端点只有连接参数不同，
+  断言代码完全一致（对应 spec「上层代码驱动无关」场景）。
+- PG 侧测试函数**自带 setup**：`pt8_probe_users` 建表 + 插数 + 用例末尾清理
+  （compose 的 `dst_users` 是空表，PT10 保留）。
+- 错误四分类与关闭幂等直接复用 PT9 的 `driver.testkit` 契约探针，
+  与 MySQL 适配器**同一份断言口径**，不在适配器里另写一份。
+
+### 环境偏差与坑（必须声明）
+
+- **Docker 仍不可用**：本机 `docker info` → "Cannot connect to the Docker daemon"，
+  Docker Desktop 引擎在本机（macOS 12.7.4 Intel）起不来 VM，上次成功运行是 2025-09-04；
+  无 colima / lima / podman 备选。因此 **openGauss 端点（5433）本轮缺席**：
+  - issue 要求的第一步「容器内建业务用户（omm 禁止远程登录）」**无法执行**——没有可运行的容器；
+  - 共享用例体对 openGauss 端点**显式打印 `[SKIP]` 声明**并跳过数据断言
+    （std.unittest 1.1.0-beta.25 仅有静态 `@Skip` 标记、无运行时 skip 入口，
+    故该用例在框架计数里仍计入 PASSED——已在测试输出与交付说明中写明这一点，不做静默跳过）。
+  - **PG 端点（5432）用原生 PostgreSQL 13.1 顶替** compose 的 `postgres:16`：
+    127.0.0.1:5432，postgres / canglin123 / canglin_src，端点、账号、库名与 compose 矩阵一致，
+    L2 用例**真实执行并通过**（非跳过）。compose 的 `dst_users` 是空表，
+    故 PG 侧测试函数自带 `pt8_probe_users` 建表/插数 setup（PT10 保留 `dst_users`）。
+- 仓颉 1.1.0-beta.25 **没有 `defer` 语法**，连接在用例末尾显式关闭。
+- cjpm 只对以 `_test.cj` 结尾的文件注入 unittest 宏（`@Assert` / `@Fail`），
+  故 PG 用例落为 `drivers/driver-pg/src/test/pg_it_test.cj`。
+- 上游异常统一包成 `SqlException`，**异常类型在下游 import 不到**，
+  只能按**消息**归类到 driver.api 的四类 DbError（`classifyError`）。
+- 域名解析失败（`Failed to resolve address <host>`）必须归 NetworkUnreachable：
+  本仓 MySQL 适配器与 PG 适配器**同一口径**（PT9 交接表列出必须覆盖的文案）。
+

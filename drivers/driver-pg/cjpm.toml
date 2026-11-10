@@ -1,0 +1,16 @@
+[package]
+  cjc-version = "1.0.5"
+  name = "pgdriver"
+  description = "PostgreSQL / openGauss 适配器：把 opengauss-driver 收敛到 driver.api 统一接口"
+  version = "0.1.0"
+  compile-option = ""
+  override-compile-option = ""
+  link-option = ""
+  output-type = "static"
+  src-dir = "src"
+  target-dir = ""
+  package-configuration = {}
+
+[dependencies]
+  driver = { path = "../driver-api" }
+  "cangjie_tpc::opengauss" = { git = "https://gitcode.com/Cangjie-TPC/opengauss-driver.git", branch = "master" }
