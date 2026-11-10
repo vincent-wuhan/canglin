@@ -1,8 +1,8 @@
 workflow: full
 phase: build
-build_mode: null
+build_mode: subagent-driven-development
 build_pause: null
-isolation: null
+isolation: branch
 verify_mode: null
 base_ref: null
 design_doc: docs/superpowers/specs/2026-11-09-poc-technical-validation-design.md
