@@ -15,6 +15,14 @@ func testColumnLoad() {
         case Long(v) => @Assert(v == 42)
         case _ => @Fail("expected Long at index 0")
     }
+    match (r.get(1)) {
+        case Double(d) => @Assert(d == 0.5)
+        case _ => @Fail("expected Double at index 1")
+    }
+    match (r.get(2)) {
+        case Str(s) => @Assert(s == "hi")
+        case _ => @Fail("expected Str at index 2")
+    }
     match (r.get(3)) {
         case Null => @Assert(true)
         case _ => @Fail("expected Null at index 3")
@@ -28,7 +36,7 @@ func testColumnRemainingKinds() {
         Column.`Bool`(true), Column.Date(now)]))
     @Assert(r.size() == 3)
     match (r.get(0)) {
-        case Bytes(bs) => @Assert(bs.size == 2)
+        case Bytes(bs) => @Assert(bs.size == 2 && bs[0] == 1 && bs[1] == 2)
         case _ => @Fail("expected Bytes at index 0")
     }
     match (r.get(1)) {
@@ -39,4 +47,10 @@ func testColumnRemainingKinds() {
         case Date(dt) => @Assert(dt == now)
         case _ => @Fail("expected Date at index 2")
     }
+}
+
+@Test
+func testEmptyRecord() {
+    let r = Record(ArrayList<Column>())
+    @Assert(r.size() == 0)
 }
