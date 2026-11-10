@@ -184,3 +184,80 @@ public func isProtocolError(e: DbError): Bool {
         case _ => false
     }
 }
+
+// ---------------------------------------------------------------------------
+// 跨适配器共用的归类口径表
+// ---------------------------------------------------------------------------
+
+/// 错误类别——与 driver.api 的四类 DbError 一一对应。
+public enum ErrorCategory {
+    | AuthFailed | NetworkUnreachable | QueryError | ProtocolError
+}
+
+// 判等手写，不用 @Derive——与 driver.api 的 DbError 同风格。
+extend ErrorCategory <: Equatable<ErrorCategory> {
+    public operator func ==(other: ErrorCategory): Bool {
+        return match ((this, other)) {
+            case (AuthFailed, AuthFailed) => true
+            case (NetworkUnreachable, NetworkUnreachable) => true
+            case (QueryError, QueryError) => true
+            case (ProtocolError, ProtocolError) => true
+            case _ => false
+        }
+    }
+    public operator func !=(other: ErrorCategory): Bool {
+        return !(this == other)
+    }
+}
+
+/// 取 DbError 的类别。
+public func categoryOf(e: DbError): ErrorCategory {
+    return match (e) {
+        case AuthFailed(_) => ErrorCategory.AuthFailed
+        case NetworkUnreachable(_) => ErrorCategory.NetworkUnreachable
+        case QueryError(_) => ErrorCategory.QueryError
+        case ProtocolError(_) => ErrorCategory.ProtocolError
+    }
+}
+
+/// 口径表的一条：错误文案 + 它必须落到的类别。
+public struct CanonicalErrorCase {
+    public let message: String
+    public let category: ErrorCategory
+
+    public init(message: String, category: ErrorCategory) {
+        this.message = message
+        this.category = category
+    }
+}
+
+/// 两个适配器共用的归类口径表。
+///
+/// MySQL 与 PG/openGauss 的异常文案各不相同，但**同一句文案在两边必须落到同一类别**
+/// ——这是 spec「上层代码驱动无关」的落点：调用方只看类别，不看文案。
+/// 这里把必须覆盖的文案固化成一张表，由两个适配器的测试各自跑一遍：
+/// 任何一边改了归类映射而没同步另一边，测试就红。
+///
+/// 表里的文案取两个适配器都可能遇到的形态（服务端错误串、套接字层错误串），
+/// 驱动特有的文案（如 MySQL 的 "Access denied for user"）不进表——
+/// 那类只由对应适配器自己的测试覆盖。
+public func canonicalErrorCases(): Array<CanonicalErrorCase> {
+    return [
+        // 认证失败
+        CanonicalErrorCase(
+            "FATAL: password authentication failed for user \"postgres\" (SQLSTATE 28P01)",
+            ErrorCategory.AuthFailed
+        ),
+        // 网络不可达
+        CanonicalErrorCase("Failed to connect 61: Connection refused.", ErrorCategory.NetworkUnreachable),
+        CanonicalErrorCase("connect timeout", ErrorCategory.NetworkUnreachable),
+        CanonicalErrorCase("Failed to resolve address no-such-host.invalid.", ErrorCategory.NetworkUnreachable),
+        CanonicalErrorCase("nodename nor servname provided, or not known", ErrorCategory.NetworkUnreachable),
+        // 查询 / 权限错误
+        CanonicalErrorCase("Table 'canglin_src.no_such_table_xyz' doesn't exist", ErrorCategory.QueryError),
+        CanonicalErrorCase("syntax error at or near \"SELCT\"", ErrorCategory.QueryError),
+        CanonicalErrorCase("permission denied for table src_users", ErrorCategory.QueryError),
+        // 协议错误
+        CanonicalErrorCase("not support message(B) in startup stage", ErrorCategory.ProtocolError)
+    ]
+}

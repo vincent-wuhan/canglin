@@ -256,6 +256,16 @@ func testErrorClassificationByMessage() {
 }
 
 @Test
+func testCanonicalErrorMessageTable() {
+    // 跨适配器共用的口径表（driver.testkit）：同一句文案在 MySQL 与 PG 适配器
+    // 必须落到同一类别，任何一边改了归类映射而没同步另一边，这里就红。
+    for (c in canonicalErrorCases()) {
+        let actual = categoryOf(classifyDbError(c.message))
+        @Assert(actual == c.category)
+    }
+}
+
+@Test
 func testErrorClassificationAgainstLiveServer() {
     // 走 driver.testkit 的驱动无关契约探针：与 PG 适配器同一份断言口径。
     let report = probeErrorClassification(

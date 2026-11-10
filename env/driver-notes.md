@@ -275,3 +275,48 @@ x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的
 - 域名解析失败（`Failed to resolve address <host>`）必须归 NetworkUnreachable：
   本仓 MySQL 适配器与 PG 适配器**同一口径**（PT9 交接表列出必须覆盖的文案）。
 
+
+## 跨适配器归类口径表（PT9 收口，2026-11-11）
+
+- 口径表已从「交接文档里的清单」变成**代码**：`driver.testkit.canonicalErrorCases()`
+  （`drivers/driver-api/src/testkit/error_contract.cj`），一条 = 一句错误文案 + 它必须落到的类别；
+  配 `categoryOf(DbError)` 把适配器给出的错误还原成类别。
+- 两个适配器各跑一遍这张表：`drivers/driver-mysql/src/test/mysql_it_test.cj` 与
+  `drivers/driver-pg/src/test/pg_contract_test.cj` 的 `testCanonicalErrorMessageTable`。
+  任何一边改了归类映射而没同步另一边，测试就红——避免两份映射各写一份、各漂移一份。
+- 表里只放**两个适配器都可能遇到**的文案（服务端错误串、套接字层错误串）；
+  驱动特有文案（如 MySQL 的 `Access denied for user`）不进表，由各自适配器的测试覆盖。
+- 本轮补的映射缺口：MySQL 侧 `permission denied for table ...` 原先落到 ProtocolError，
+  已改归 QueryError（权限不足是 SQL 语义错误，不是协议问题）。
+
+### stdx 版本必须与工具链同源（ABI 实测）
+
+- 用**为别的 cjc 版本构建**的 stdx，std.core 的接口虚表布局不一致，运行期直接崩：
+  - stdx **1.0.0.1**（为 cjc 1.0.0 构建）+ cjc 1.1.0-beta.25 → 虚调用落到错误槽位，SIGSEGV
+    （如 `SimpleLogger.isClosed()`）。
+  - stdx **1.2.0**（为 cjc 1.2.0 构建）+ cjc 1.1.0-beta.25 → 启动即 abort：
+    `expected interface std.core:Collection<Tuple<String,String>> is not in class std.collection:HashMap<String,String>`。
+- 结论：stdx 必须**用本机工具链自建**（中心仓的 stdx 1.1.0 源码 `cjpm build`，
+  或用发行包但确认其 `cjc_version` 与本机一致）。PT8 落地用的是
+  `~/.cjpm/repository/source/default/stdx-1.2.0/target/darwin_x86_64_cjnative/static`
+  （其 package.json 标 `cjc_version = 1.1.0-beta.25`，与本机同源）。
+- 自建 stdx 时的坑：Apple clang 11 不接受 `-mmacosx-version-min=12.0.0`（需把 stdx 的
+  deployment target 改 10.15）；缺 `cmake`/`ninja`（brew 拉不动时 pip 装）、缺 `llvm-ranlib`
+  （SDK 只有 llvm-ar）；原生 FFI 静态库在 `build_temp/build/lib/`，**要拷进
+  `target/release/stdx/`**，否则下游链接找不到 `-lstdx.*FFI`。
+- 下游（opengauss-driver）只声明
+  `[target.x86_64-apple-darwin.bin-dependencies] path-option = ["${CANGJIE_STDX_PATH}"]`，
+  不会把 stdx 的 FFI 库带进最终可执行文件的链接行；自建 stdx 1.1.0 时下游还需显式补
+  `link-option = "-lstdx.encoding.jsonFFI -lstdx.encoding.json.streamFFI -lstdx.crypto.keysFFI
+  -lstdx.crypto.x509FFI -lstdx.net.tlsFFI -lcangjie-dynamicLoader-opensslFFI ..."`，
+  运行期 `DYLD_LIBRARY_PATH` 需含 stdx 目录与 OpenSSL 3 所在目录。
+
+### 本机端点现状复核（2026-11-11）
+
+- **Docker 引擎仍不可用**：`docker info` → "Cannot connect to the Docker daemon"，
+  `docker desktop` 子命令在本机 CLI（17.09.0-ce）里已不存在 → compose 三容器矩阵
+  （MySQL/PG/openGauss）起不来，**openGauss 端点（5433）本轮仍缺席**。
+- 端点用原生进程顶替（与 compose 矩阵的端点/账号/库名一致）：
+  - MySQL 8.0.28 @ 127.0.0.1:3306（root/canglin123，库 canglin_src，src_users 10000 行 / 100 行 NULL note）
+  - PostgreSQL 13.1 @ 127.0.0.1:5432（postgres/canglin123，库 canglin_src，**只有空表 dst_users**，
+    源表 src_users 只在 MySQL 侧）

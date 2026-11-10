@@ -254,7 +254,9 @@ public func classifyDbError(message: String): DbError {
     }
     if (m.contains("doesn't exist") || m.contains("does not exist") || m.contains("unknown column") ||
         m.contains("unknown table") || m.contains("syntax") || m.contains("errorcode") ||
-        m.contains("duplicate entry")) {
+        m.contains("duplicate entry") ||
+        // 权限不足属于 SQL 语义错误（服务端拒绝这条语句），不是协议问题
+        m.contains("permission denied")) {
         return DbError.QueryError(message)
     }
     return DbError.ProtocolError(message)
