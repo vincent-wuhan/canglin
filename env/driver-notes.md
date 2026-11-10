@@ -38,3 +38,31 @@ openGauss 初始密码为 `GS_PASSWORD=Canglin@123`（compose 内）；首次进
 ## DevEco Studio
 
 DEFERRED：`developer.huawei.com/consumer/cn/download/` 强制 302 到 `oauth-login.cloud.huawei.com` 华为账号登录墙，无法无头下载。需人工登录下载 mac(arm) dmg 并拖入 /Applications。canglin POC 的 kernel/drivers/cli 任务不依赖它。
+
+## Intel Mac 上的 Cangjie SDK（PT6 实测，2026-11-11）
+
+官方 1.0.5 只发布 `cangjie-sdk-mac-aarch64-1.0.5.tar.gz`（无 mac-x64），**Intel 机器跑不了**。
+可用的 x64 包是 `cangjie-sdk-mac-x64-1.1.0-beta.25.tar.gz`（280256419 字节，sha256
+`b0b3a8208f883a62ce36e51ce9e3b30c303a5809bd1bef6c4d9381f5da5a3a8b`）：
+
+```
+https://cangjie-lang.cn/v1/files/auth/downLoad?nsId=142267&fileName=cangjie-sdk-mac-x64-1.1.0-beta.25.tar.gz&objectKey=69cb71666e8ed61e6e07fd41
+```
+
+解压后 `source <解压目录>/envsetup.sh`：`cjc --version` = Cangjie Compiler 1.1.0-beta.25 (cjnative)
+x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的 `cjc-version` 仍写 1.0.5
+（cjpm 不因工具链更新而报错）。
+
+### 1.1.0-beta.25 校准坑（PT6 实测）
+
+- **cjpm 包名只能是标识符**：`driver-api`、`driver.api` 均被拒（`the 'name' field ... is wrong, the example is 'cjDemo'`）。
+- **仓颉包名必须与 cjpm name 一致**：`src/` 根包名 == cjpm name，`src/<子目录>/` 包名 == cjpm name + `.<子目录>`
+  （否则报 "the package name in ... is wrong, the right name should be ..."）。
+  故 `drivers/driver-api` 用 cjpm name `driver`，源码包名 `driver.api`，下游导入写 `import driver.api.*`，
+  依赖写法 `driver = { path = "../driver-api" }`（已实测下游模块可正常 import + 编译）。
+- **标准库没有 `Result`/`Ok`/`Err`**：实测 std 各包均未导出 Ok/Err 构造器（`import std.core.*` 也没有）。
+  任务书草图里的 `Result<T, E>` 需自建——已在 `driver.api` 定义（`Ok`/`Err`）。
+- **struct/enum 没有默认 toString**：`println(struct)` 编译报错 "'toString' is not a member of struct"。
+  要打印就自己 `extend X <: ToString`（struct 已验证可行），`ToString` 对 enum 同样可行。
+- **`StringBuilder.append` 返回 Unit，不能链式调用**：`sb.append(a).append(b)` 编译失败，须分行写。
+

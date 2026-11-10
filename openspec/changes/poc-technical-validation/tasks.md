@@ -9,7 +9,7 @@
 ## 2. 驱动连通（driver-connectivity）
 
 - [ ] 2.1 确定 mysqlclient4cj / opengauss-driver 获取方式（中心仓或源码依赖）与版本组合，记录兼容矩阵
-- [ ] 2.2 搭建 drivers/ cjpm 工程：driver-api 统一接口（连接/查询/元数据）
+- [x] 2.2 搭建 drivers/ cjpm 工程：driver-api 统一接口（连接/查询/元数据）
 - [ ] 2.3 实现 MySQL 适配器：建连/SELECT 行集/库表列元数据，密码脱敏日志
 - [ ] 2.4 实现 PG/openGauss 适配器：同 2.3 口径
 - [ ] 2.5 错误分类验证：错误密码与不可达主机返回可区分错误，编写并跑通对应单测
