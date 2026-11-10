@@ -15,7 +15,10 @@
   driver = { path = "../driver-api" }
   kernel = { path = "../../kernel" }
   # mysqlclient4cj（Cangjie-SIG）= MariaDB/MySQL 的仓颉 CDBC 驱动。
-  # 取 tag 2.0.2：master 的 cjc-version 要求 1.1.0，本机工具链为 1.1.0-beta.25。
+  # 取 master：tag 2.0.2 只能配 stdx 1.0.x（crypto.keys 的 PrivateKey API 已变，
+  # 编不过）；master 已适配 stdx 1.1.x，与 PG 侧 opengauss-driver 需要的
+  # stdx.net.tls.common 共存于同一份 stdx——PT10 的 CLI 要在一个进程里同时
+  # 用 MySQL 与 PG 适配器，两者必须共用同一份 stdx。
   # 该依赖的 cjpm.toml 以 ${CANGJIE_STDX_PATH} 引用 stdx 静态库，
   # 构建前须 export CANGJIE_STDX_PATH=<stdx 发行包>/static/stdx。
-  mariadb = { git = "https://gitcode.com/Cangjie-SIG/mysqlclient4cj.git", tag = "2.0.2" }
+  mariadb = { git = "https://gitcode.com/Cangjie-SIG/mysqlclient4cj.git", branch = "master" }

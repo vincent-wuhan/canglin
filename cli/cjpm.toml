@@ -1,0 +1,18 @@
+[package]
+  cjc-version = "1.0.5"
+  name = "canglin_cli"
+  description = "canglin POC CLI：MySQL→PG 万行同步与吞吐基线"
+  version = "0.1.0"
+  compile-option = ""
+  override-compile-option = ""
+  link-option = ""
+  output-type = "executable"
+  src-dir = ""
+  target-dir = ""
+  package-configuration = {}
+
+[dependencies]
+  kernel = { path = "../kernel" }
+  driver = { path = "../drivers/driver-api" }
+  mysql_driver = { path = "../drivers/driver-mysql" }
+  pgdriver = { path = "../drivers/driver-pg" }

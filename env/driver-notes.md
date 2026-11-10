@@ -320,3 +320,92 @@ x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的
   - MySQL 8.0.28 @ 127.0.0.1:3306（root/canglin123，库 canglin_src，src_users 10000 行 / 100 行 NULL note）
   - PostgreSQL 13.1 @ 127.0.0.1:5432（postgres/canglin123，库 canglin_src，**只有空表 dst_users**，
     源表 src_users 只在 MySQL 侧）
+
+## PT10 万行同步吞吐基线（2026-11-11）
+
+### 测量口径
+
+- 命令：`cd cli && cjpm run --`（连接串走 `CANGLIN_MYSQL_DSN` / `CANGLIN_PG_DSN`，
+  缺省即 127.0.0.1 上的 MySQL 3306 / PG 5432，库 `canglin_src`）。
+- 源表 `src_users` 10000 行（id 1..10000，note 每 100 行一个 NULL），
+  目标表 `dst_users`（列集合与源表一致，score/note 可空，created_at NOT NULL）。
+- 作业形态：MySQLReader 分页 `SELECT ... ORDER BY id LIMIT n OFFSET m`（每页 500 行）
+  → Record → Channel → PgWriter 批量 `INSERT`（每批 500 行，批内一个事务）。
+- 吞吐 = 成功行数 ÷ 作业耗时（`ok * 1000 / elapsed_ms`），耗时只算作业本身，不含建连。
+
+### 结果
+
+| 场景 | ok | dirty | 耗时 ms | 吞吐（行/秒） |
+|---|---|---|---|---|
+| 万行同步（batch=500，第 1 次） | 10000 | 0 | 596 | 16778 |
+| 万行同步（batch=500，第 2 次） | 10000 | 0 | 601 | 16638 |
+| 万行同步（batch=500，第 3 次） | 10000 | 0 | 608 | 16447 |
+| 万行同步（batch=500，第 4 次） | 10000 | 0 | 721 | 13869 |
+| 万行同步（batch=200） | 10000 | 0 | 656 | 15243 |
+| 万行同步（batch=1000） | 10000 | 0 | 582 | 17182 |
+| 脏行变体（batch=500） | 9950 | 50 | 649 | 15331 |
+
+- **基线取 batch=500 的一组：吞吐 1.5 万～1.7 万行/秒，作业耗时 0.58～0.72 秒。**
+- 批大小只影响往返次数：500 → 1000 行/批 吞吐涨约 3%，200 行/批跌约 8%；
+  再大（>2000）收益趋平，且单批事务变长、失败时逐行回退的重试成本线性上升——不作为基线。
+- PG 侧 `SELECT COUNT(*) FROM dst_users` = **10000**（CLI 的 `count` 子命令同口径）。
+- 峰值常驻内存：约 **46 MB**（30ms 间隔采样 `ps -o rss`，全量 1 万行只保留
+  一批 500 行在管道里，故内存与行数无关、与批大小线性相关）。
+- 脏行变体：`src_users_dirty` 的 score 声明为 VARCHAR，其中 id 能被 200 整除的
+  **50 行**（200,400,…,10000）值为 `N/A` → 与目标列 DOUBLE PRECISION 类型错配；
+  作业不中断，`ok=9950 dirty=50`，PG 侧 `dst_users_dirty` COUNT(*) = 9950。
+
+### 环境声明（Docker 不可用）
+
+- **Docker 引擎仍不可用**（`docker info` → Cannot connect to the Docker daemon），
+  compose 三容器矩阵起不来；openGauss 端点（5433）本轮同样缺席（PT10 不依赖它）。
+- 本轮 L2 用**原生 MySQL 8.0.28 + 原生 PostgreSQL 13.1** 顶替 compose 的 MySQL8/PG16，
+  端点、账号、库名与 compose 矩阵完全一致（127.0.0.1:3306 / :5432，canglin123，canglin_src）。
+- 因此 PT10 的 L2 用例**真实执行并通过**，不是跳过（`cjpm test` Summary: TOTAL 36 / PASSED 36 /
+  SKIPPED 0 / FAILED 0）。用例里的不可达分支按 PT8 同一口径打印 `[SKIP]` 声明后跳过。
+- 复现步骤：`env/init/01-mysql.sql` → `env/init/02-pg.sql` → `env/init/03-mysql-dirty.sql` →
+  `env/init/04-pg-dirty.sql`，然后 `cd cli && cjpm run --`。
+  ⚠️ MySQL 侧建表灌数**不能走驱动**（见下），要用 mysql 客户端执行 SQL 文件。
+
+### PT10 新增校准坑
+
+- **mysqlclient4cj 必须用 master 分支，不能用 tag 2.0.2**（PT7 当时锁的是 2.0.2）：
+  tag 2.0.2 的 `cjc-version` 要求 1.1.0（高于本机 1.1.0-beta.25），且它构建时链接的
+  stdx 静态库与 pgdriver 需要的 stdx 不是同一份。`cli` 是**第一个同时链接 mysql_driver
+  与 pgdriver 的模块**，这个冲突到 PT10 才暴露：两个适配器必须共用同一份 stdx
+  （stdx-1.1.0，含 mariadb 要的 crypto.keys/crypto.digest/encoding.url 与
+  opengauss-driver 要的 net.tls.common）。本轮把 `drivers/driver-mysql/cjpm.toml`
+  的 mariadb 依赖切到 `branch = "master"`，`cjpm.lock` 随之更新。
+  本机编译环境变量见 `env/cangjie-env.sh`（`CANGJIE_PACKAGE_PATH` / `CANGJIE_STDX_PATH` /
+  `LIBRARY_PATH` / `DYLD_LIBRARY_PATH` 指向 openssl3，再 source SDK 的 envsetup.sh）。
+- **MySQL 适配器的 `query()` 只支持 SELECT**：上游 mysqlclient4cj 走
+  `ServerPrepareStatement`，DDL/DML 会报
+  "Execute non-select statements using the query method."——即 MySQL 侧建表、灌数、
+  UPDATE 都**不能经驱动执行**。故脏行变体的源表用 `env/init/03-mysql-dirty.sql`
+  建好，测试只读不写。PG 适配器的 `query()` 则支持 DDL/DML（simpleExec 路径），
+  PG 侧建表可直接走驱动。
+- **PG 事务控制语句要走简单查询协议**：`BEGIN` / `COMMIT` / `ROLLBACK` 经
+  `conn.query()` 发送，失败后连接仍可用（上游 `simpleExec` → `ResultReader.close()`
+  会读到 ReadyForQuery 为止），所以「整批失败 → ROLLBACK → 逐行重试」这条路是通的。
+- **PG 字符长度按字符计、不按字节**：information_schema 的 `character_maximum_length`
+  是字符数，仓颉 `String.size` 是字节数——判超长要用 `utf8CharCount`（数非续字节）。
+- **`Float64.toString()` 固定 6 位小数**：浮点列的字面量写成 `88.500000` 而不是 `88.5`，
+  PG 能收，但不等于源值的原始文本形态。
+- **仓颉 lambda 必须有期望类型**：`(key: String) => ...` 这种带注解的写法编译不过，
+  要写成 `let f: EnvLookup = { key => ... }`；捕获 lambda 的参数未使用会报 unused 警告。
+- **`Option<T> == None` 要求 `T: Equatable`**：`Endpoint` / `SyncOptions` /
+  `Array<ColumnBinding>` 都不是 Equatable，测试里判空要写成 `isNone<T>(v)` 这类泛型辅助
+  （`match` 两个分支），否则报 "generic type should be used with type argument"。
+- **CLI 入口**：`main(args: Array<String>): Int64` 直接收命令行参数；
+  `cjpm run -- --src-table=xxx` 的 `--` 之后才是传给程序的部分。
+- **std.unittest 1.1.0-beta.25 的跳过机制**：有 `@Skip` 宏（在 `std.unittest.testmacro`，
+  必须写在 `@Test` **之前**），但**没有** `@Ignore`；且**没有运行时 skip 入口**——
+  被跳过的用例仍计入框架 PASSED 计数，只能靠 stdout 打印 `[SKIP]` 声明留痕（与 PT8 同一口径）。
+- **`cjpm test` 假成功坑可复现**：src/ 根目录没有 .cj 文件时子目录不被扫描，
+  输出 `TOTAL: 0 / PASSED: 0` 且退出码 0。验收仍必须断言 `PASSED > 0`。
+- **macOS 上 `/usr/bin/time` 是 SIP 保护二进制**：它会清掉子进程的 `DYLD_LIBRARY_PATH`，
+  仓颉可执行文件随即报 "Library not loaded: @rpath/libcangjie-runtime.dylib"，
+  峰值 RSS 测不出来（只能改用 `ps -o rss` 采样）。
+- **原生 PG 实例里的 `dst_users` 曾是 2 列的旧表**（PT8 探针留下的），
+  与 `env/init/02-pg.sql` 的 5 列定义不符；PT10 已按 init 脚本重建。
+  PT8 的 L2 用例自带 `pt8_probe_users` 建表，不写 `dst_users`，两者互不干扰。
