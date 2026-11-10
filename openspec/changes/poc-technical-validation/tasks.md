@@ -2,9 +2,9 @@
 
 ## 1. 工具链与环境
 
-- [ ] 1.1 安装 Cangjie SDK 1.0.5 LTS（mac-aarch64）并验证 cjc/cjpm 可用
-- [ ] 1.2 安装 DevEco Studio（含 ArkUI-Cangjie 支持与鸿蒙模拟器/预览器）
-- [ ] 1.3 编写 env/docker-compose.yml（MySQL 8 / PostgreSQL 16 / openGauss 固定 tag）及初始化 SQL（含 1 万行源表），启动并验证三容器健康
+- [x] 1.1 安装 Cangjie SDK 1.0.5 LTS（mac-aarch64）并验证 cjc/cjpm 可用
+- [ ] 1.2 安装 DevEco Studio（含 ArkUI-Cangjie 支持与鸿蒙模拟器/预览器）<!-- DEFERRED：华为登录墙，需用户手动安装，阻塞 PT11/PT12 -->
+- [x] 1.3 编写 env/docker-compose.yml（MySQL 8 / PostgreSQL 16 / openGauss 固定 tag）及初始化 SQL（含 1 万行源表），启动并验证三容器健康
 
 ## 2. 驱动连通（driver-connectivity）
 
