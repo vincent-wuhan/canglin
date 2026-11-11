@@ -2,6 +2,8 @@ package pgdriver.test
 
 import std.convert.*
 import std.env.getVariable
+import std.fs.*
+import std.time.*
 import std.unittest.*
 import driver.api.*
 import driver.testkit.*
@@ -19,9 +21,62 @@ import pgdriver.*
 //
 // 错误分类与关闭幂等走 driver.testkit 的驱动无关契约探针（PT9 交付），
 // 与 MySQL 适配器共用同一份断言口径。
+//
+// 端点是否真跑过必须有据可查：std.unittest 会捕获用例里的 stdout/stderr 且通过时不回显
+// （PT11 实测），故 [RUN]/[DONE]/[SKIP] 声明一律**落盘**到 target/pg-driver-it.log
+// （路径可用 CANGLIN_SKIP_LOG 改），stdout 只作兜底。
 
 private const PROBE_TABLE = "pt8_probe_users"
 private const UNRESOLVABLE_HOST = "no-such-host.invalid"
+
+// 端点运行/跳过声明的落盘路径：CANGLIN_SKIP_LOG 指定，缺省写到 target/pg-driver-it.log。
+private func itLogPath(): String {
+    return match (getVariable("CANGLIN_SKIP_LOG")) {
+        case Some(p) => p
+        case None => "target/pg-driver-it.log"
+    }
+}
+
+/// 追加一行运行声明到日志文件。
+///
+/// std.unittest 通过时不回显 stdout，所以声明必须落盘才留得住痕迹。
+private func appendItLog(line: String): Unit {
+    let path = itLogPath()
+    try {
+        File.appendTo(path, (line + "\n").toArray())
+    } catch (e: Exception) {
+        println("[WARN] 声明落盘失败（${path}）：${e.message}")
+    }
+}
+
+/// 同时落盘并打印一行运行声明。
+private func declare(line: String): Unit {
+    appendItLog(line)
+    println(line)
+}
+
+// ---------------------------------------------------------------------------
+// 端点差异画像：DATE 列
+//
+// 真机实测（PostgreSQL 14 与 openGauss 5.0.0）两个端点对 DATE 的呈现**一致**：
+//   - 类型 OID 都是 1082（date），query() 路径类型名都是 DATE，
+//     tableColumns() 路径 information_schema 的 data_type/udt_name 都是 date；
+//   - 取值文本都是 "2026-01-02"，openGauss 侧没有 " 00:00:00" 后缀；
+//   - openGauss 的 information_schema.columns 对 DATE 列给出
+//     data_type=date、datetime_precision=0，format_type() 也是 date。
+//
+// 即：先前「openGauss 把 DATE 实现为 timestamp(0)、类型名 TIMESTAMP」的判断
+// 在 openGauss 5.0.0 上不成立，**适配器无需做任何 DATE 归一化**。
+//
+// 这里仍保留按端点给断言的口径（两个常量当前取值相同）：断言与端点画像一一对应，
+// 若后续换用确实把 DATE 折叠成 timestamp 的 openGauss 版本，只需改 OG_* 两个常量，
+// 不必改断言体。详见 env/driver-notes.md「DATE 端点画像实测」一节。
+// ---------------------------------------------------------------------------
+
+private const PG_DATE_TYPE = "DATE"
+private const PG_DATE_VALUE = "2026-01-02"
+private const OG_DATE_TYPE = "DATE"
+private const OG_DATE_VALUE = "2026-01-02"
 
 private func envOr(name: String, fallback: String): String {
     match (getVariable(name)) {
@@ -96,12 +151,17 @@ func testDbTypeName(): Unit {
 func testClassifyErrorCategories(): Unit {
     // 认证失败：服务端 FATAL + SQLSTATE 28P01
     @Assert(isAuthFailed(classifyError("FATAL: password authentication failed for user \"postgres\" (SQLSTATE 28P01)")))
+    // 账号不存在（PT9 交接表：role "..." does not exist 归 AuthFailed）
+    @Assert(isAuthFailed(classifyError("FATAL: role \"canglin\" does not exist")))
+    @Assert(isAuthFailed(classifyError("FATAL: invalid password for user \"canglin\"")))
     // 目标不可达
     @Assert(isNetworkUnreachable(classifyError("127.0.0.1:59999: Connection refused")))
+    @Assert(isNetworkUnreachable(classifyError("could not connect to server")))
+    @Assert(isNetworkUnreachable(classifyError("Name or service not known")))
     // 域名解析失败同属网络不可达（与 MySQL 适配器同一口径）
     @Assert(isNetworkUnreachable(classifyError(
         "no-such-host.invalid:5432: SocketException: Failed to resolve address no-such-host.invalid.")))
-    // SQL 本身出错
+    // SQL 本身出错（relation 不存在不能被误判成账号问题）
     @Assert(isQueryError(classifyError("ERROR: relation \"pt8_missing_xyz\" does not exist (SQLSTATE 42P01)")))
     // 协议层不兼容
     @Assert(isProtocolError(classifyError("not support message(B) in startup stage")))
@@ -125,16 +185,24 @@ func testPasswordNeverLeaksIntoMessages(): Unit {
 /// allowSkip=true：连接阶段判定为「网络不可达」时打印显式 SKIP 声明并跳过
 /// （用于 openGauss 容器缺席的环境）；此时该端点的数据断言一条未跑。
 /// allowSkip=false：任何连接失败都判为用例失败，避免假成功。
-private func runEndpointSuite(cfg: ConnConfig, label: String, allowSkip: Bool): Unit {
+///
+/// dateType/dateValue：该端点 DATE 列应有的类型名与取值文本（服务端差异，见文件头画像说明）。
+private func runEndpointSuite(
+    cfg: ConnConfig,
+    label: String,
+    allowSkip: Bool,
+    dateType: String,
+    dateValue: String
+): Unit {
     let drv = PgDriver()
     match (drv.connect(cfg)) {
-        case Ok(conn) => runSuiteOn(conn, cfg, label)
+        case Ok(conn) => runSuiteOn(conn, cfg, label, dateType, dateValue)
         case Err(e) => match (e) {
             case NetworkUnreachable(_) =>
                 if (allowSkip) {
-                    println("[SKIP] ${label} 端点 ${cfg.host}:${cfg.port} 不可达：${e}")
-                    println("[SKIP] 该端点本轮数据断言未执行；std.unittest 1.1.0-beta.25 仅有静态 @Skip " +
-                        "标记、无运行时 skip 入口，故本用例仍计入框架 PASSED 计数——双端点覆盖待容器可达后重跑")
+                    declare("[SKIP] ${DateTime.now()} ${label} 端点 ${cfg.host}:${cfg.port} 不可达：${e}")
+                    declare("[SKIP] 该端点本轮数据断言未执行；std.unittest 1.1.0-beta.25 仅有静态 @Skip " +
+                        "标记、无运行时 skip 入口，故本用例仍计入框架 PASSED 计数——双端点覆盖待实例可达后重跑")
                     return
                 }
                 @Fail("${label} 端点不可达：${e}")
@@ -143,8 +211,14 @@ private func runEndpointSuite(cfg: ConnConfig, label: String, allowSkip: Bool): 
     }
 }
 
-private func runSuiteOn(conn: Connection, cfg: ConnConfig, label: String): Unit {
-    println("[RUN ] ${label} 端点 ${cfg.host}:${cfg.port} 共享用例开始")
+private func runSuiteOn(
+    conn: Connection,
+    cfg: ConnConfig,
+    label: String,
+    dateType: String,
+    dateValue: String
+): Unit {
+    declare("[RUN ] ${DateTime.now()} ${label} 端点 ${cfg.host}:${cfg.port} 共享用例开始")
 
     // --- setup：PT8 独立表，不写 dst_users（PT10 保留） ---
     execOk(conn, "DROP TABLE IF EXISTS ${PROBE_TABLE}")
@@ -173,7 +247,7 @@ private func runSuiteOn(conn: Connection, cfg: ConnConfig, label: String): Unit 
     @Assert(rs.columns[2].typeName == "DOUBLE PRECISION")
     @Assert(rs.columns[3].typeName == "NUMERIC")
     @Assert(rs.columns[4].typeName == "BOOLEAN")
-    @Assert(rs.columns[5].typeName == "DATE")
+    @Assert(rs.columns[5].typeName == dateType)
     @Assert(rs.columns[6].typeName == "BYTEA")
     // 上游 oid2typename 把 oid 25(text) 与 1043(varchar) 统一归为 SqlVarchar，
     // 故 query() 路径下 TEXT 列的类型名显示为 VARCHAR；精确类型见 tableColumns 断言。
@@ -185,7 +259,7 @@ private func runSuiteOn(conn: Connection, cfg: ConnConfig, label: String): Unit 
     expectF64(rs.rows[0][2], 88.5, "row0.score")
     expectF64(rs.rows[0][3], 12.25, "row0.ratio")
     expectI64(rs.rows[0][4], 1, "row0.active")
-    expectStr(rs.rows[0][5], "2026-01-02", "row0.born")
+    expectStr(rs.rows[0][5], dateValue, "row0.born")
     expectBytes(rs.rows[0][6], 2, "row0.payload")
     expectStr(rs.rows[0][7], "first", "row0.note")
 
@@ -226,7 +300,7 @@ private func runSuiteOn(conn: Connection, cfg: ConnConfig, label: String): Unit 
     @Assert(cols[2] == ColumnDef("score", "DOUBLE PRECISION"))
     @Assert(cols[3] == ColumnDef("ratio", "NUMERIC"))
     @Assert(cols[4] == ColumnDef("active", "BOOLEAN"))
-    @Assert(cols[5] == ColumnDef("born", "DATE"))
+    @Assert(cols[5] == ColumnDef("born", dateType))
     @Assert(cols[6] == ColumnDef("payload", "BYTEA"))
     @Assert(cols[7] == ColumnDef("note", "TEXT"))
 
@@ -242,14 +316,14 @@ private func runSuiteOn(conn: Connection, cfg: ConnConfig, label: String): Unit 
     // --- 清理（连接关闭前） ---
     match (conn.query("DROP TABLE IF EXISTS ${PROBE_TABLE}")) {
         case Ok(_) => ()
-        case Err(e) => println("[WARN] ${label} 清理 ${PROBE_TABLE} 失败：${e}")
+        case Err(e) => declare("[WARN] ${label} 清理 ${PROBE_TABLE} 失败：${e}")
     }
 
     // --- 关闭幂等 ---
     conn.close()
     conn.close()
 
-    println("[DONE] ${label} 端点 ${cfg.host}:${cfg.port} 共享用例通过")
+    declare("[DONE] ${DateTime.now()} ${label} 端点 ${cfg.host}:${cfg.port} 共享用例通过")
 }
 
 private func execOk(conn: Connection, sql: String): Unit {
@@ -305,8 +379,10 @@ func testPgAndOpenGaussEndpoints(): Unit {
     // 对应 spec「上层代码驱动无关：仅连接参数中的驱动类型标识不同，调用代码完全一致」。
     //
     // PG 端点任何连接失败都判失败；openGauss 端点在容器缺席时打印显式 SKIP 声明后跳过。
-    runEndpointSuite(pgConfig(), "PostgreSQL", false)
-    runEndpointSuite(openGaussConfig(), "openGauss", true)
+    //
+    // 两个端点当前只有 DATE 列按端点画像给断言（实测两个端点取值相同，见文件头说明）。
+    runEndpointSuite(pgConfig(), "PostgreSQL", false, PG_DATE_TYPE, PG_DATE_VALUE)
+    runEndpointSuite(openGaussConfig(), "openGauss", true, OG_DATE_TYPE, OG_DATE_VALUE)
 }
 
 @Test

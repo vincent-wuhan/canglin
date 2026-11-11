@@ -267,6 +267,8 @@ PT11 升到 **1.1.0**（STS 线，见「工具链基线」一节；此前写 1.0
     127.0.0.1:5432，postgres / canglin123 / canglin_src，端点、账号、库名与 compose 矩阵一致，
     L2 用例**真实执行并通过**（非跳过）。compose 的 `dst_users` 是空表，
     故 PG 侧测试函数自带 `pt8_probe_users` 建表/插数 setup（PT10 保留 `dst_users`）。
+  - ⚠️ **本节描述的是首轮状态**：openGauss 端点后来用 QEMU + chroot 起出了**真 openGauss 5.0.0**，
+    双端点已在真实例上跑通——见下文「PT8 controller 回执整改 → 6. 真 openGauss 实例复跑双端点测试」。
 - 仓颉 1.1.0-beta.25 **没有 `defer` 语法**，连接在用例末尾显式关闭。
 - cjpm 只对以 `_test.cj` 结尾的文件注入 unittest 宏（`@Assert` / `@Fail`），
   故 PG 用例落为 `drivers/driver-pg/src/test/pg_it_test.cj`。
@@ -535,3 +537,180 @@ https://cangjie-lang.cn/v1/files/auth/downLoad?nsId=142267&fileName=<fileName>&o
 
 三种场景均 **PASSED 36 / FAILED 0**，且 `cli/target/skip-decl.log` 留下带时间戳的声明；
 实例可达时该文件不产生新条目，L2 真实执行。
+## PT8 controller 回执整改（2026-11-11）
+
+### 1. openGauss 建业务用户：脚本入库 `env/setup-opengauss-user.sh`
+
+- **为什么必须有这一步**（两条独立原因）：
+  1. openGauss 的 **omm 禁止远程登录**（pg_hba 虽放行 md5，omm 本身不允许远程登录），
+     驱动侧只能以普通业务账号走 TCP 连进来 —— 账号必须先在容器内建好；
+  2. openGauss 每个库的 **public schema 属 omm**，普通用户默认只有 USAGE 没有 CREATE，
+     不显式授权的话业务用户建表直接 **42501**（permission denied for schema）。
+- 脚本做三件事，**幂等可重复执行**：
+  1. `CREATE USER canglin WITH PASSWORD '…'`（已存在则 `ALTER USER` 同步口令）；
+  2. `CREATE DATABASE canglin_src OWNER canglin`（已存在则跳过）；
+  3. `GRANT ALL ON SCHEMA public TO canglin` + `GRANT ALL ON DATABASE canglin_src TO canglin`
+     —— 授权**必须在目标库内**执行（openGauss 的 public schema 是 per-database 的，
+     在 postgres 库里授权对 canglin_src 无效）。
+- 脚本末尾**自检**：以业务账号经 TCP（容器内 127.0.0.1:5432）建表/插入/查询/删表，
+  42501 这类问题会在这一步直接暴露，不会等到适配器用例才发现。
+- 支持两种实例形态（`CANGLIN_OPENGAUSS_ROOT` 切换）：
+  - 容器形态（默认）：`docker exec -u omm … gsql`；
+  - **chroot 形态**：`CANGLIN_OPENGAUSS_ROOT=/opt/ocentros`，SQL 一律经
+    `chroot <root> runuser -u omm -- gsql` 执行（chroot 内没有 sudo，
+    且 omm 禁止远程登录，只能靠 runuser 降权）。
+- **openGauss 侧三个必须绕开的坑**（本次真机实测踩到）：
+  1. `ALTER USER … WITH PASSWORD` 传**与旧口令相同**的值会直接报
+     `New password should not equal to the old ones` → 脚本改用
+     `DO $$ … EXCEPTION WHEN OTHERS THEN IF SQLERRM NOT LIKE '%should not equal to the old ones%' THEN RAISE; END IF; END $$;`
+     包一层，口令一致视为「已同步」，其他错误照常抛出；
+  2. `password_reuse_time` 默认 60 天，**旧口令在窗口内不可复用**
+     （报 `The password cannot be reused`）→ 需要改回历史口令时先把该 GUC 置 0；
+  3. openGauss 的 `gsql` **不认 `PGPASSWORD` 环境变量**（会退化成交互式提示），
+     口令必须写进连接串：`gsql "postgresql://user:pass@host:5432/db"`。
+     脚本内部统一走「stdin 喂 SQL + URI 传口令」两条路径，绕开引号转义与该限制。
+- **口令存储格式**：openGauss 把口令存成 `sha256<hex>`（加盐），
+  故 pg_hba 的 host 行要用 openGauss 自己的 `sha256` 认证方法，
+  写 `md5` 会一律 `Invalid username/password`；`password_encryption_type=1`（md5）
+  更会让新口令以 MD5 密文入库，与 openGauss 的校验方式不一致。
+
+### 2. listSchemas() 对普通用户返回空：实现缺陷已修
+
+- 现象：openGauss 上普通业务用户查 `information_schema.schemata` 得到空集，
+  上层对象树的第一层（schema 清单）直接是空的。
+- 修法（`drivers/driver-pg/src/pg_driver.cj` → `PgConnection.listSchemas`）：
+  改为**三个来源取并集**，任一来源报错都不影响其余来源：
+  1. `pg_catalog.pg_namespace` + `has_schema_privilege(nspname, 'USAGE')`——服务端目录，
+     按「用户可用的 schema」过滤（两个端点都支持这两个函数）；
+  2. `information_schema.schemata`——PostgreSQL 上最权威的来源；
+  3. `information_schema.tables` 的 `DISTINCT table_schema`——从用户可见对象反查。
+- 只有三个来源**都**为空时才把最后一个错误透出（不静默返回空集）；
+  全部成功但确实没有可见 schema 时才返回空数组。
+
+### 3. DATE 端点画像实测：两端一致，**不需要**适配层归一化
+
+- 早前基于「openGauss 服务端把 DATE 实现为 timestamp(0)」的判断，
+  在**真 openGauss 5.0.0 实例**上实测**不成立**，据此改口径。
+- 真机实测（PostgreSQL 14 与 openGauss 5.0.0，同一张探针表）：
+
+  | 观测点 | PostgreSQL | openGauss 5.0.0（实测） |
+  |---|---|---|
+  | `pg_type` 里 date 的 OID | 1082 | **1082** |
+  | `query()` 列类型名 | `DATE` | **`DATE`** |
+  | `tableColumns()` 列类型 | `DATE` | **`DATE`** |
+  | `information_schema.columns.data_type` | `date` | **`date`** |
+  | `format_type(atttypid, atttypmod)` | `date` | **`date`** |
+  | DATE 取值文本 | `2026-01-02` | **`2026-01-02`**（无 ` 00:00:00` 后缀） |
+
+- openGauss 侧 `information_schema.columns` 对 DATE 列给的是
+  `data_type=date`、`udt_name=date`、`datetime_precision=0`；上游 opengauss-driver 的
+  `oid2typename` 也把 1082 映射成 `SqlDate`（不是 `SqlTimestamp`），
+  故 `canonicalTypeName()` 两端都得到 `DATE`。
+- **结论**：适配层**不需要**任何 DATE 归一化，也不存在 DATE 与 TIMESTAMP 折叠的问题。
+  实现上仍按「分端点测试口径」保留 `PG_DATE_*` / `OG_DATE_*` 两个常量
+  （当前取值相同），好处是断言与端点画像一一对应：
+  若后续换用确实把 DATE 折叠成 timestamp 的 openGauss 版本，只改 `OG_*` 两个常量即可，
+  不必改断言体，也不必改适配层。
+- 对上层的影响（须写进对象树设计）：**没有** DATE/TIMESTAMP 歧义，
+  下游可正常按类型名 `DATE` 还原日期，无需按文本截断。
+- 与 controller 回执的差异说明：回执第 3 条要求在「适配器归一化」与「分端点测试口径」之间二选一，
+  本次选**分端点测试口径**，且实测结论是两端画像相同——即所需的归一化量为零。
+
+### 4. 工具链脚本 `env/cangjie-env.sh`（PT11 复核后并入上游基线）
+
+- **去 $HOME 硬编码**：所有路径来自 `CANGLIE_SDK_HOME` / `CANGLIE_STDX_HOME` /
+  `CANGLIE_STDX_VERSION` / `CANGLIE_CJPM_HOME` / `CANGLIE_OPENSSL_HOME` 等变量，或运行时探测
+  （PATH 上的 cjc/cjpm 反推 SDK 根、仓库内 `.toolchain/`）；脚本内不含任何具体机器的绝对路径
+  （`${HOME}/cangjie-sdk`、`${HOME}/openssl3` 这类写法是「按 HOME 推导」，不是硬编码绝对路径）。
+- **stdx 获取路径脚本化**：按钉住的版本（默认 **1.1.0**，与仓库基线一致）在 cjpm 仓库缓存里找
+  `<cache>/repository/source/default/stdx-<版本>/target/<三元组>/static`；
+  找不到时脚本建一个只依赖 stdx 的临时工程，`cjpm build` 把发行包拉进缓存后重试，
+  导出 `CANGJIE_PACKAGE_PATH`（static 目录）与 `CANGJIE_STDX_PATH`（static/stdx 目录）。
+  钉住 1.1.0 而不是「取缓存里最大的」的原因见「跨适配器归类口径表」一节：
+  **一个模块里同时依赖两个适配器时只能共用一份 stdx**（1.1.0 同时含 mariadb 要的
+  crypto.keys/crypto.digest/encoding.url 与 opengauss-driver 要的 net.tls.common；
+  1.0.0.1 缺 net.tls.common，1.2.0 的 crypto.keys API 与 mariadb master 不兼容）。
+- **OpenSSL 3 只能追加、不能前插**：`DYLD_LIBRARY_PATH` 里把 `openssl3/lib` 放在**末尾**
+  （SDK 运行时在前）。前插会让 openssl3/lib 里的库抢先装载、盖掉 SDK 自带运行时，
+  实测表现为 **mysql 适配器用例直接 SIGSEGV**（`catched unhandled SIGSEGV ... signal pc: 0x0`）。
+  同时把 SDK envsetup 留下的首尾空冒号去掉（空冒号等于把 cwd 也放进装载路径）。
+- **SDK 基线**：脚本与 SDK 版本无关（只 source `<SDK>/envsetup.sh`），
+  切版本只需改 `CANGLIE_SDK_HOME`。**STS 1.1.0 官方包矩阵里没有 macOS x86_64 包**
+  （本机是 Intel Mac；STS 只发 mac-aarch64，linux-x64 需要容器而本机 Docker 引擎起不来），
+  故本机可用的 1.1.x 工具链上限就是已装的 **1.1.0-beta.25**——
+  详见上文「工具链基线：SDK 1.1.x STS 口径（PT11 复核）」，仓库侧 `cjc-version` 已升到 **1.1.0**。
+  （`/v1/files/auth/downLoad` 缺 `objectKey` 返回 `{"code":500}`，是签名参数缺失，不是包不存在。）
+
+### 5. 错误归类口径对齐 PT9 交接表（PG 侧补 4 处文案）
+
+- PT9 交接表要求各适配器覆盖同一批文案。MySQL 侧（a49480e）已按宽匹配覆盖；
+  PG 侧补齐缺口：`invalid password`、`role "..." does not exist` → AuthFailed；
+  `could not connect`、`name or service not known` → NetworkUnreachable。
+- **关键区分**：`role "x" does not exist`（登录账号不存在）归 AuthFailed，
+  而 `relation "x" does not exist`（表不存在）仍归 QueryError——两者形态相近，
+  用 `role ` 前缀区分，避免把「表不存在」误判成账号问题。
+- 另补 `no pg_hba.conf entry`（服务端按来源拒绝连接）→ AuthFailed，
+  与 MySQL 侧 `not allowed to connect` 同口径。
+- 断言写在 `testClassifyErrorCategories`（纯函数用例，不依赖数据库，随 `cjpm test` 常跑）。
+
+
+
+### 6. 真 openGauss 实例复跑双端点测试（2026-11-11）
+
+- **实例**：本机 Docker Desktop 4.41.2 在 macOS 12.7.4 上起不来 Linux 虚机
+  （4.41 要求 macOS 13+，后端日志 `no connected VM`），故改用 **QEMU 8.2.0 起 Ubuntu 20.04
+  guest + guest 内 chroot 跑 openGauss 5.0.0**，宿主经 `hostfwd` 暴露
+  `127.0.0.1:5433 → guest:5432`（SSH 走 `127.0.0.1:2222`）。
+- **加速限制**：`kern.hv_support=1` 但 **HVF 被系统拒绝**（`HV_DENIED`）——
+  macOS 12 只认 Developer ID 签名的 hypervisor 权限，ad-hoc 签名不被接受，
+  本机 `security find-identity -v -p codesigning` 为 0 个身份。
+  另：`codesign --options runtime` 会禁掉 TCG 的 JIT 可执行内存
+  （`allocate ... bytes for jit buffer: Invalid argument`），
+  故最终签名口径是**普通 ad-hoc、不带 hardened runtime**。
+  结果是全程 **TCG 模拟**（4 vCPU 满载，guest 启动约 2 分钟）。
+- **实例落地**：从 `enmotech/opengauss:5.0.0` 取 5 个镜像层，
+  宿主机 `python3 -m http.server` 起在 `127.0.0.1:8000`，
+  guest 经 QEMU slirp 的宿主网关 `10.0.2.2:8000` 用 python3 urllib 拉取
+  （ISO 作为回退路径保留）→ guest 内 `/opt/ocentros` 组装出镜像根文件系统 →
+  `chroot` + `runuser -u omm` 按镜像 entrypoint 的官方流程
+  `gs_initdb --pwfile=… --nodename=… --encoding=UTF-8 --no-locale --dbcompatibility=PG`
+  + `gs_ctl start`。
+  - **踩坑**：`--nodename` 不接受连字符（`canglin-og` 非法），须用 `canglin_og`。
+- **双端点测试结果**（`env/run-pg-tests.sh`，`CANGLIN_OPENGAUSS_PORT=5433`）：
+  - 并入 PT11 基线（`cjc-version` 升 1.1.0、stdx 钉 1.1.0、新增 PT9 口径表用例）后：
+    `Summary: TOTAL: 10, PASSED: 10, SKIPPED: 0, ERROR: 0, FAILED: 0`
+    （8 条 PT8 用例 + 2 条 PT9 口径表用例）。
+  - 同批基线回归：`drivers/driver-mysql` 12/12、`cli` 36/36（均 `SKIPPED: 0`）。
+  - PostgreSQL 端点：`127.0.0.1:5432`，业务库 `canglin_src`。
+  - openGauss 端点：`127.0.0.1:5433`，`openGauss 5.0.0 build a07d57c3`，
+    业务用户 `canglin` / 业务库 `canglin_src` / public schema 已授权。
+- **端点真跑过的落盘凭据**（PT11 复核发现 std.unittest 会捕获用例里的 stdout、
+  通过时不回显，所以 `[SKIP]` 声明靠 stdout 是**看不见**的）：
+  `drivers/driver-pg/src/test/pg_it_test.cj` 现在把 `[RUN]`/`[DONE]`/`[SKIP]` 三类声明
+  一律**落盘**到 `drivers/driver-pg/target/pg-driver-it.log`（路径可用 `CANGLIN_SKIP_LOG` 改），
+  stdout 只作兜底。一轮绿跑的日志内容：
+
+  ```
+  [RUN ] 2026-11-11T19:17:25.7323+08:00 PostgreSQL 端点 127.0.0.1:5432 共享用例开始
+  [DONE] 2026-11-11T19:17:25.767664+08:00 PostgreSQL 端点 127.0.0.1:5432 共享用例通过
+  [RUN ] 2026-11-11T19:17:26.082624+08:00 openGauss 端点 127.0.0.1:5433 共享用例开始
+  [DONE] 2026-11-11T19:17:26.942844+08:00 openGauss 端点 127.0.0.1:5433 共享用例通过
+  ```
+- **「真跑」的可核验证据**（allowSkip 机制下 PASSED 不等于跑过 5433 断言，故留四条实证）：
+  1. **反证**：把 openGauss 口令改错重跑，用例**如实失败**——
+     `openGauss 端点连接失败：DbError.AuthFailed(127.0.0.1:5433: SqlException:
+     Invalid username/password,login denied. (SQLSTATE 28P01))`，
+     且落盘日志里只有 PostgreSQL 半边的 `[DONE]`、openGauss 半边只有 `[RUN]`；
+     说明 openGauss 半边的连接与断言确实参与判定，不是静默跳过。
+  2. **服务端计数**：同一时间窗内 openGauss `pg_stat_database`（库 `canglin_src`）
+     `xact_commit 740 → 782`、`tup_inserted 363 → 416`、`tup_deleted 345 → 395`，
+     即驱动在 5433 上真的执行了建表/插数/删表语句（`tup_inserted`/`tup_deleted` 的增量
+     正好对应探针表的 3 行插入与建表/删表）。
+  3. **失败即真跑**：首轮把 openGauss 画像写成 `TIMESTAMP` 时，用例在 openGauss 半边
+     报 `Assert Failed: (rs.columns[5].typeName == dateType)`（PG 半边已通过）——
+     错误确实来自 5433 端点；改正画像后转绿。
+  4. **落盘日志**：见上，两端点各自的 `[RUN]`/`[DONE]` 带时间戳留痕。
+- **认证路径**：pg_hba 的 host 行用 openGauss 自己的 `sha256` 方法，
+  上游 opengauss-driver 的 `ogAuth` 分支处理 `AuthenticationRFC5802`
+  （`pwdMethod` 0/2 → `RFC5802Algorithm`），实测连接成功——
+  即「openGauss 走 RFC5802、PostgreSQL 走标准 md5」的双协议分支都验过。

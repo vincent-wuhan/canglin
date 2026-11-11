@@ -110,9 +110,18 @@ public func scrub(message: String, secret: String): String {
 public func classifyError(message: String): DbError {
     let m = message.toAsciiLower()
     // 认证：SQLSTATE 28P01 / 28000，或认证相关关键字
+    //
+    // 覆盖 PT9 交接表要求的文案：password authentication failed / authentication failed /
+    // invalid password / role "..." does not exist。
+    // 「role ... does not exist」是 PG/openGauss 对**不存在的登录账号**的报错
+    //（FATAL: role "canglin" does not exist），属认证失败而非 SQL 错误——
+    // 注意它与 QueryError 侧的 relation "..." does not exist 形态相近，
+    // 故用 role 前缀区分，避免把不存在的表误判成账号问题。
     if (m.contains("sqlstate 28p01") || m.contains("sqlstate 28000") ||
         m.contains("password authentication failed") || m.contains("authentication failed") ||
-        m.contains("permission denied for user")) {
+        m.contains("invalid password") || m.contains("permission denied for user") ||
+        m.contains("no pg_hba.conf entry") ||
+        (m.contains("role ") && m.contains("does not exist"))) {
         return DbError.AuthFailed(message)
     }
     // 协议：握手/报文层与驱动预期不符
@@ -128,13 +137,16 @@ public func classifyError(message: String): DbError {
     // 若不单列会落到兜底的 QueryError 类别。
     if (m.contains("refused") || m.contains("unreachable") || m.contains("timed out") ||
         m.contains("timeout") || m.contains("no route to host") || m.contains("connection reset") ||
-        m.contains("connect error") || m.contains("connect failed") || m.contains("broken pipe") ||
+        m.contains("connect error") || m.contains("connect failed") || m.contains("could not connect") ||
+        m.contains("broken pipe") ||
         m.contains("failed to resolve") || m.contains("resolve address") ||
         m.contains("name resolution") || m.contains("unknown host") ||
+        m.contains("name or service not known") ||
         m.contains("nodename nor servname")) {
         return DbError.NetworkUnreachable(message)
     }
     // 其余归为 SQL / 元数据请求错误
+    // （relation "..." does not exist / syntax error / permission denied for table 等）
     return DbError.QueryError(message)
 }
 
@@ -176,11 +188,45 @@ public class PgConnection <: ApiConnection {
         }
     }
 
+    /// 列出当前用户可见的 schema。
+    ///
+    /// openGauss 对普通用户的 `information_schema.schemata` 有可见性限制，可能返回空集，
+    /// 故这里取三个来源的并集（任一来源报错不影响其余来源）：
+    ///   1. `pg_catalog.pg_namespace` + `has_schema_privilege(..., 'USAGE')`——服务端目录，
+    ///      按「用户可用的 schema」过滤；
+    ///   2. `information_schema.schemata`——PostgreSQL 上最权威的来源；
+    ///   3. `information_schema.tables` 反查——从用户可见对象反推 schema 名。
+    ///
+    /// 不做去重以外的加工：服务端有几个 schema 就返回几个（系统 schema 也一并列出，
+    /// 与 PostgreSQL 上的既有行为一致）。
     public func listSchemas(): Result<Array<String>, DbError> {
-        match (this.query("SELECT schema_name FROM information_schema.schemata ORDER BY schema_name")) {
-            case Ok(rs) => return Ok(firstColumnStrings(rs))
-            case Err(e) => return Err(e)
+        let candidates = [
+            "SELECT nspname FROM pg_catalog.pg_namespace " +
+                "WHERE has_schema_privilege(nspname, 'USAGE') ORDER BY nspname",
+            "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
+            "SELECT DISTINCT table_schema FROM information_schema.tables ORDER BY table_schema"
+        ]
+        let out = ArrayList<String>()
+        var lastErr: Option<DbError> = None
+        for (sql in candidates) {
+            match (this.query(sql)) {
+                case Ok(rs) =>
+                    for (name in firstColumnStrings(rs)) {
+                        if (!out.contains(name)) {
+                            out.add(name)
+                        }
+                    }
+                case Err(e) => lastErr = Some(e)
+            }
         }
+        if (out.isEmpty()) {
+            // 三个来源都没给出 schema：能报错就报错（否则上层拿不到失败原因）
+            match (lastErr) {
+                case Some(e) => return Err(e)
+                case None => return Ok(Array<String>())
+            }
+        }
+        return Ok(out.toArray())
     }
 
     public func listTables(schema: String): Result<Array<String>, DbError> {
