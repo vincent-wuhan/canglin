@@ -714,3 +714,29 @@ https://cangjie-lang.cn/v1/files/auth/downLoad?nsId=142267&fileName=<fileName>&o
   上游 opengauss-driver 的 `ogAuth` 分支处理 `AuthenticationRFC5802`
   （`pwdMethod` 0/2 → `RFC5802Algorithm`），实测连接成功——
   即「openGauss 走 RFC5802、PostgreSQL 走标准 md5」的双协议分支都验过。
+## stdx 1.1.0 安装备忘（mac arm64 / cjc 1.1.0 STS，2026-11-11）
+
+- **基础安装**：gitcode `Cangjie/cangjie_stdx` release v1.1.0.1 的 mac-aarch64 zip
+  解包后三类产物进 SDK（`$CJ` = SDK 根目录）：
+  `*.cjo → $CJ/modules/darwin_aarch64_cjnative/stdx/`、
+  `*.dylib → $CJ/runtime/lib/darwin_aarch64_cjnative/`（平铺）、
+  `*.a → $CJ/lib/darwin_aarch64_cjnative/`（平铺）。
+- **工程侧接线**：cjpm.toml 加 `[dependencies] stdx = "1.1.0"`；`[package]` 的
+  link-option 补 `"-lcangjie-dynamicLoader-opensslFFI"`——stdx 包对子模块声明的
+  该编译选项不会传播到最终链接行，缺它则 crypto/tls 的 `DYN_*` 符号全部 undefined。
+- **首次构建**会从 cjpm 中心仓拉 stdx-1.1.0 源码包并 cmake+ninja 编译原生库。
+  mac 前置：`brew install cmake ninja openssl@3`；llvm-ranlib 缺失由
+  env/cangjie-env.sh 自动补（符号链接到 SDK 自带 llvm-ar，二者同体）。
+- **一次性补丁（必做）**：中心仓源码构建的 FFI 库符号是 zip 版超集
+  （357 vs 353，含 `_DYN_CRYPTO_memcmp`），须覆盖 SDK 内 zip 版，否则运行时
+  dyld 报 `Symbol not found: _DYN_CRYPTO_memcmp`：
+  ```
+  PKG=~/.cjpm/repository/source/default/stdx-1.1.0/target/darwin_aarch64_cjnative/static/stdx
+  cp "$PKG/libcangjie-dynamicLoader-opensslFFI.a"   $CJ/lib/darwin_aarch64_cjnative/
+  cp "$PKG/libcangjie-dynamicLoader-opensslFFI.dylib" $CJ/runtime/lib/darwin_aarch64_cjnative/
+  ```
+- **验证**：SM3 摘要输出 32 字节通过；stdx.net.tls 已由 cjpm 自身 HTTPS 拉中心仓
+  间接验证可用；`stdx.net.tls.common`（opengauss-driver 依赖）已就位。
+  中心仓包 cjpm.toml 标 cjc-version=1.1.0，与 STS 工具链实测兼容。
+- 仍避坑：发行包 1.0.0.1 缺 net.tls.common；stdx-1.2.0 的 crypto.keys API 与
+  mariadb master 不兼容——锁 1.1.0。
