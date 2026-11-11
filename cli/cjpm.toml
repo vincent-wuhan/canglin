@@ -1,5 +1,5 @@
 [package]
-  cjc-version = "1.0.5"
+  cjc-version = "1.1.0"
   name = "canglin_cli"
   description = "canglin POC CLI：MySQL→PG 万行同步与吞吐基线"
   version = "0.1.0"

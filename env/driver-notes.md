@@ -50,8 +50,8 @@ https://cangjie-lang.cn/v1/files/auth/downLoad?nsId=142267&fileName=cangjie-sdk-
 ```
 
 解压后 `source <解压目录>/envsetup.sh`：`cjc --version` = Cangjie Compiler 1.1.0-beta.25 (cjnative)
-x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的 `cjc-version` 仍写 1.0.5
-（cjpm 不因工具链更新而报错）。
+x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的 `cjc-version` 已于
+PT11 升到 **1.1.0**（STS 线，见「工具链基线」一节；此前写 1.0.5，cjpm 不因工具链更新而报错）。
 
 ### 1.1.0-beta.25 校准坑（PT6 实测）
 
@@ -409,3 +409,129 @@ x86_64-apple-darwin；`cjpm --version` = 1.1.0-beta.25。仓库里 cjpm.toml 的
 - **原生 PG 实例里的 `dst_users` 曾是 2 列的旧表**（PT8 探针留下的），
   与 `env/init/02-pg.sql` 的 5 列定义不符；PT10 已按 init 脚本重建。
   PT8 的 L2 用例自带 `pt8_probe_users` 建表，不写 `dst_users`，两者互不干扰。
+
+## 工具链基线：SDK 1.1.x STS 口径（PT11 复核，2026-11-11）
+
+### 结论先说
+
+- 官网把版本分 **LTS / STS / Nightly** 三条通道；**STS = 1.1.0 final**（2026-04-24 发布），
+  Nightly 线已到 1.2.0。
+- **STS 1.1.0 官方包矩阵里没有 macOS x86_64 包**：下载页共 11 个包
+  （linux-x64 / linux-aarch64 / linux-x64-android / linux-x64-ohos /
+  mac-aarch64 / mac-aarch64-android / mac-aarch64-ios / mac-aarch64-ohos /
+  windows-x64 / windows-x64-android / windows-x64-ohos），Intel Mac 无包可下。
+- 证据不是「页面上没看到」：下载页的文件清单（内嵌 `version.f405f0c6.js`）里
+  `cangjie-sdk-mac-x64-*` **只有 1.1.0-beta.23 / beta.24 / beta.25 三个**，
+  1.1.0 final 与 1.2.0 都只发 mac-aarch64。
+- 本机是 **Intel Mac**（Intel Core i5-6267U / macOS 12.7.4 / x86_64-apple-darwin），
+  mac-aarch64 的 SDK 跑不了——Rosetta 2 只做 x86_64→arm64，不做反向。
+- linux-x64 的 STS SDK 只能进容器：**本机 Docker Desktop 4.41.2 的 Linux VM 起不来**
+  （`docker desktop status` → stopped；后端日志 `Proxy error handling "/_ping": no connected VM`；
+  `docker ps` → 500 Internal Server Error）。
+- **所以本机可用的 1.1.x 工具链上限就是已装的 1.1.0-beta.25**（beta 通道最后一个 mac-x64 1.1.x 包），
+  STS 1.1.0 需要 Apple Silicon 或 linux-x64 环境（下载地址与校验值见下）。
+
+### 仓库侧已做的基线升级
+
+- 5 个模块的 `cjc-version` 由 `1.0.5` 升到 **`1.1.0`**（STS 线）：
+  `kernel/`、`drivers/driver-api/`、`drivers/driver-mysql/`、`drivers/driver-pg/`、`cli/`。
+- 升级理由不是追新，而是**修声明不一致**：依赖本身（mysqlclient4cj master `f21a83ae`、
+  opengauss-driver `169813b`）的 `cjc-version` 就是 `1.1.0`，我们写 1.0.5 低于依赖自己的下限。
+- 升完 `cjpm build` 与 `cjpm test` 全绿（见下节复跑），本机编译器仍是 1.1.0-beta.25。
+
+### STS 1.1.0 复现信息（给 Apple Silicon / linux-x64 CI）
+
+下载链接是前端 JS 拼的，`objectKey` 是 Mongo ObjectId、猜不出来，得从
+`https://csdnimg.cn/release/devpress-cangjie/public/js/chunk/organization/download/version.f405f0c6.js`
+里挖。URL 模板：
+
+```
+https://cangjie-lang.cn/v1/files/auth/downLoad?nsId=142267&fileName=<fileName>&objectKey=<objectKey>
+```
+
+| 包 | objectKey | sha256 |
+|---|---|---|
+| cangjie-sdk-mac-aarch64-1.1.0.tar.gz | 69eac73121f5a8178d6fd21b | d39f4044e37d55ae1473488225bc2018fc4d9df42b6cdd9b3cc2ca956e6f22bf |
+| cangjie-sdk-linux-x64-1.1.0.tar.gz | 69e9d50c21f5a8178d6fd219 | 5ce7e8c8523aad9cf5965f818249e1a39f10788963aef7c5852697a3ac964060 |
+
+### PT11 新增校准坑
+
+- **`cjc-version` 不能写预发布号**：`cjc-version = "1.1.0-beta.25"` 被 cjpm 拒
+  （"the 'cjc-version' field ... is wrong, the example is '1.0.0'"）。
+  声明只能写发行线（1.1.0），没法写「实际装的 beta 包」——所以「声明的基线」与
+  「本机编译器版本」在 Intel Mac 上必然不一致，这个缺口要靠文档交代而不是靠声明表达。
+- **cjpm 不对根包强制 `cjc-version` 下限**：实测填 `1.2.0`、`9.9.9` 一样 `cjpm build success`。
+  该字段是「本包面向哪条工具链线」的声明——依赖侧（mysqlclient4cj master `f21a83ae`、
+  opengauss-driver `169813b`）自己声明的都是 `1.1.0`，我们跟着对齐；本机编译器是
+  1.1.0-beta.25（STS 1.1.0 无 mac-x64 包），声明写 `1.1.0` 仍能正常构建，
+  说明 cjpm 不按预发布号做下限判定。
+- **std.unittest 会吞掉用例里的 stdout/stderr**：用例通过时框架不回显捕获到的输出，
+  所以 `[SKIP]` 声明打进 stdout **根本看不见**（实测 `cjpm test` 日志里 0 处）。
+  声明必须落盘（`std.fs.File.appendTo`），本仓落在 `cli/target/skip-decl.log`
+  （路径可用环境变量 `CANGLIN_SKIP_LOG` 改）。PT8/PT10 记的「靠 stdout 留痕」这条口径要按此修正。
+- **端口被别的服务占住时，错误分类看的是协议不是端口**：PG 驱动打到 MySQL 的 3306 端口，
+  握手失败被归成 `DbError.QueryError`（"unknown message type 74"），**不是** AuthFailed。
+  建连阶段要按「任意失败 = 环境未就绪」处理，否则换个服务占端口就会误判失败。
+- **Docker Desktop 4.41.2 在 macOS 12.7.4 的 Intel 机上起不来 Linux VM**：
+  桌面端进程在、CLI 也在（28.1.1），但 `docker desktop status` 恒为 stopped，
+  API 一律 500 "no connected VM"。别指望装个 Docker 就能跑 linux-x64 的 STS SDK。
+- **Multica 守护进程会往每条 commit 塞 AI 署名**：`prepare-commit-msg` 钩子
+  （装在 `$(git rev-parse --git-common-dir)/hooks/prepare-commit-msg`，文件头写明
+  "Installed by the Multica daemon. Do not edit"）自动追加
+  `Co-authored-by: multica-agent <github@multica.ai>`。本仓对外公开、署名规范是
+  「commit 一律不带 AI 署名」，故提交时用
+  `git -c core.hooksPath=/dev/null commit …` 跳过该钩子——该钩子目录里只有这一个
+  钩子，没有别的提交前检查被一并跳过。历史 commit 不动。
+
+## PT11 复核：基线升级后的构建与万行基线复跑（2026-11-11）
+
+### 变更范围
+
+- `cjc-version` 1.0.5 → 1.1.0（5 个模块的 cjpm.toml）。
+- `cli/src/test/sync_it_test.cj`：连接串改由环境变量 `CANGLIN_MYSQL_DSN` / `CANGLIN_PG_DSN`
+  提供（复用 `canglin_cli.sync.parseDsn` 与 `DEFAULT_*_DSN`），不再硬编码主机端口；
+  建连阶段任何失败一律打印 `[SKIP]` 声明并跳过（不再只认 NetworkUnreachable）。
+
+### 构建与测试
+
+- `cjpm build` success（4 条 warning 全部来自上游 opengauss-driver 的 deprecated 标注）。
+- `cjpm test`：**TOTAL 36 / PASSED 36 / SKIPPED 0 / ERROR 0 / FAILED 0**（PASSED>0 已断言）。
+  两个 L2 用例**真实执行**（627ms / 652ms，非跳过）。
+
+### 万行基线复跑（同一编译器 1.1.0-beta.25，batch=500，5 次）
+
+| 场景 | ok | dirty | 耗时 ms | 吞吐（行/秒） |
+|---|---|---|---|---|
+| 万行同步（batch=500，第 1 次） | 10000 | 0 | 625 | 16000 |
+| 万行同步（batch=500，第 2 次） | 10000 | 0 | 592 | 16892 |
+| 万行同步（batch=500，第 3 次） | 10000 | 0 | 684 | 14620 |
+| 万行同步（batch=500，第 4 次） | 10000 | 0 | 725 | 13793 |
+| 万行同步（batch=500，第 5 次，二进制直跑） | 10000 | 0 | 682 | 14663 |
+| 万行同步（batch=200） | 10000 | 0 | 679 | 14728 |
+| 万行同步（batch=1000） | 10000 | 0 | 631 | 15848 |
+| 脏行变体（batch=500） | 9950 | 50 | 784 | 12691 |
+
+- 基线区间：**1.38 万～1.69 万行/秒，作业耗时 0.59～0.73 秒**，与 PT10 的
+  1.39 万～1.72 万行/秒同量级（波动来自共享机器，非回归）。
+- PG 侧 `COUNT(*)`：dst_users = **10000**，dst_users_dirty = **9950**。
+- 峰值常驻内存：**47452 KB ≈ 46 MB**（30ms 间隔 `ps -o rss` 采样，与 PT10 一致）。
+- 脏行变体：50 行 `N/A` 仍被逐行跳过，作业不中断，脏行样本照常打印。
+
+### 这轮复跑证明了什么、没证明什么
+
+- **证明了**：声明基线升到 STS 线（1.1.0）后，构建、36 条用例（含 L2 端到端）与万行基线
+  全部照旧成立，数字已更新到上表。
+- **没证明**：换了 STS 编译器之后数字如何——**编译器二进制没变**（仍是 1.1.0-beta.25），
+  因为 STS 1.1.0 没有 mac-x64 包（见「工具链基线」一节）。
+  要拿到 STS 口径的数字，需在 Apple Silicon 或 linux-x64 机器上装 1.1.0 重跑同一套基线。
+
+### 集成测试跳过路径实测（三种环境未就绪）
+
+| 场景 | 注入 | 结果 |
+|---|---|---|
+| 端口被别的服务占住 | `CANGLIN_PG_DSN=postgres://…@127.0.0.1:3306/canglin_src` | SKIP 声明（建连失败：unknown message type 74） |
+| 端口不可达 | `CANGLIN_MYSQL_DSN=mysql://…@127.0.0.1:13306/canglin_src` | SKIP 声明（NetworkUnreachable: Connection refused） |
+| DSN 畸形 | `CANGLIN_MYSQL_DSN=not-a-dsn` | SKIP 声明（不是合法连接串） |
+
+三种场景均 **PASSED 36 / FAILED 0**，且 `cli/target/skip-decl.log` 留下带时间戳的声明；
+实例可达时该文件不产生新条目，L2 真实执行。

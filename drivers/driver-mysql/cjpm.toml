@@ -1,5 +1,5 @@
 [package]
-  cjc-version = "1.0.5"
+  cjc-version = "1.1.0"
   name = "mysql_driver"
   description = "MySQL adapter (mysqlclient4cj) for the unified driver API"
   version = "0.1.0"
