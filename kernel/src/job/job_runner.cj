@@ -34,12 +34,21 @@ public struct JobStat {
 public class JobRunner {
     private let capacity: Int64
 
-    /// capacity：管道容量，与 kernel.channel.BoundedChannel 默认一致。
+    /// capacity：管道容量上限。BoundedChannel 没有默认容量（必须显式传参），
+    /// 这里的 1024 是 JobRunner 自己给的默认值。
     public init(capacity!: Int64 = 1024) {
         this.capacity = capacity
     }
 
     /// 跑完一次作业并返回统计。
+    ///
+    /// 异常语义：Reader 或 Writer 任一侧抛异常，run() 都把该异常原样抛给调用方
+    /// （Future.get() 会重抛协程内异常），且不留孤儿协程：
+    ///   - Reader 抛：其协程的 finally 兜底 close 管道，Writer 收到 EOF 正常退出；
+    ///     join Reader 时重抛 Reader 的异常。
+    ///   - Writer 抛：close 管道解除 Reader 在 send 上的阻塞，再 join Reader
+    ///     （吞掉读侧派生的 ChannelClosedException，保留 Writer 异常为根因），
+    ///     最后重抛 Writer 的异常。
     ///
     /// join 顺序固定为「先 Writer 后 Reader」：Reader 协程带 finally 兜底
     /// close（幂等），所以 Reader 抛异常时 Writer 仍能收到 EOF 而不是永久阻塞，
@@ -65,9 +74,16 @@ public class JobRunner {
         let writeStat = try {
             writerTask.get()
         } catch (e: Exception) {
-            // Writer 异常退出时关闭管道，解除 Reader 阻塞在 send 上的等待，
-            // 避免半个流水线挂在后台（close 幂等，正常路径不受影响）。
+            // Writer 异常退出：先关闭管道，解除 Reader 阻塞在 send 上的等待；
+            // 再 join 读侧协程，否则慢 I/O 的 Reader 会在 run() 返回后继续跑
+            // （孤儿协程）。读侧异常是管道关闭的派生结果，不是本次失败的根因，
+            // 在此吞掉，保留 Writer 异常作为根因抛出。
             channel.close()
+            try {
+                readerTask.get()
+            } catch (readerError: Exception) {
+                // 读侧派生异常（如 send 遇 closed 抛 ChannelClosedException）
+            }
             throw e
         }
         readerTask.get()

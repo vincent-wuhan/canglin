@@ -6,44 +6,12 @@ package kernel.test
 //   - 脏行不中断作业：行级成败由 Writer 判定并计入 WriteStat，
 //     JobRunner 只搬运与汇总，不参与行级判定
 //
-// 本文件只依赖 kernel.spi 的接口契约（Reader / Writer / WriteStat）：
-// 干净路径用 PT4 提供的内存假实现（MemoryReader / MemoryWriter）；
-// 脏行注入需要一个「指定行为脏行」的 Writer——PT4 的脏行注入入口形态
-// 尚未固化，故此处按 SPI 契约自实现 DirtySkipWriter。
+// 假实现统一在 kernel/src/test/fakes_test.cj（DirtyEveryWriter / Throwing* /
+// SlowReader）与 kernel.spi（MemoryReader / MemoryWriter），本文件只写断言。
 
-import kernel.channel.*
 import kernel.job.*
 import kernel.spi.*
 import std.unittest.*
-
-/// 脏行 Writer：每 dirtyEvery 行判一行脏（模拟类型不兼容），
-/// 脏行跳过并计入 dirty，其余行计入 ok；不抛错、不中断作业。
-class DirtySkipWriter <: Writer {
-    private let dirtyEvery: Int64
-
-    public init(dirtyEvery: Int64) {
-        this.dirtyEvery = dirtyEvery
-    }
-
-    public func write(ch: Channel): WriteStat {
-        var ok: Int64 = 0
-        var dirty: Int64 = 0
-        var index: Int64 = 0
-        while (true) {
-            match (ch.recv()) {
-                case Some(_) =>
-                    index += 1
-                    if (dirtyEvery > 0 && index % dirtyEvery == 0) {
-                        dirty += 1 // 脏行：跳过，不计成功
-                    } else {
-                        ok += 1
-                    }
-                case None => break // EOF：消费完毕
-            }
-        }
-        return WriteStat(ok, dirty)
-    }
-}
 
 @Test
 func testJobRunClean() {
@@ -73,8 +41,49 @@ func testJobRunTenThousandRows() {
 func testJobRunWithDirtyRows() {
     let runner = JobRunner()
     // 100 行中每 30 行判一行脏 → 第 30/60/90 行共 3 行脏
-    let stat = runner.run(MemoryReader(100), DirtySkipWriter(30))
+    let stat = runner.run(MemoryReader(100), DirtyEveryWriter(30))
     @Assert(stat.dirty == 3)
     @Assert(stat.ok == 97)
     @Assert(stat.elapsedMs >= 0)
+}
+
+@Test
+func testJobRunPropagatesReaderError() {
+    // Reader 侧抛异常：run() 必须原样传播异常（不吞掉、不包装成别的类型），
+    // 且不能挂死——带超时的 get 是看门狗，真挂死会得到 TimeoutException，
+    // 而不是让整个测试套件卡住。顺带锁住平台假设：Future.get() 重抛协程内
+    // 异常且保留异常类型。
+    let runner = JobRunner(capacity: 8)
+    let task = spawn { runner.run(ThrowingReader(3), MemoryWriter()) }
+    var outcome = "no-exception"
+    try {
+        task.get(Duration.second * 10)
+        outcome = "no-exception"
+    } catch (e: FakeError) {
+        outcome = "fake-error"
+    } catch (e: TimeoutException) {
+        outcome = "timeout"
+    }
+    @Assert(outcome == "fake-error")
+}
+
+@Test
+func testJobRunPropagatesWriterErrorAndJoinsReader() {
+    // Writer 侧抛异常：run() 传播的是 Writer 的异常（不是读侧派生的
+    // ChannelClosedException），并且必须 join 读侧协程——慢收尾的 Reader 在
+    // run() 抛出时已终止，不留孤儿协程。
+    let runner = JobRunner(capacity: 1)
+    let signal = Signal()
+    let task = spawn { runner.run(SlowReader(1000, signal), ThrowingWriter(1)) }
+    var outcome = "no-exception"
+    try {
+        task.get(Duration.second * 10)
+        outcome = "no-exception"
+    } catch (e: FakeError) {
+        outcome = "fake-error"
+    } catch (e: TimeoutException) {
+        outcome = "timeout"
+    }
+    @Assert(outcome == "fake-error")
+    @Assert(signal.isDone())
 }

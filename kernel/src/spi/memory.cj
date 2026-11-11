@@ -9,6 +9,32 @@ import kernel.channel.Channel
 import kernel.record.*
 import std.collection.*
 
+/// 脏行判定规则：「哪一行算脏行」的唯一口径，kernel.spi 的假实现与
+/// kernel 测试基建共用，避免各处各写一套语义（行序号从 1 开始，与 recv 计数一致）。
+///   - every > 0：每 every 行判一行脏（every=30 → 第 30/60/90 行脏）
+///   - at > 0：仅第 at 行判脏（at=5 → 只有第 5 行脏）
+///   - 都不设置：无脏行
+public struct DirtyRule {
+    public let every: Int64
+    public let at: Int64
+
+    public init(every!: Int64 = 0, at!: Int64 = 0) {
+        this.every = every
+        this.at = at
+    }
+
+    /// 第 index 行（从 1 开始）是否判为脏行。
+    public func isDirty(index: Int64): Bool {
+        if (every > 0) {
+            return index % every == 0
+        }
+        if (at > 0) {
+            return index == at
+        }
+        return false
+    }
+}
+
 /// 内存 Reader：产出 rows 行，行内容为首列 Long(序号)、次列 Str("row-<序号>")。
 public class MemoryReader <: Reader {
     private let rows: Int64
@@ -47,19 +73,19 @@ public class FileMockReader <: Reader {
 /// 内存 Writer：只统计成功行数与脏行数。
 /// dirtyAt > 0 时，第 dirtyAt 条收到的行判为脏行（计入 dirty 并跳过）。
 public class MemoryWriter <: Writer {
-    private let dirtyAt: Int64
+    private let rule: DirtyRule
     private var consumed: Int64 = 0
     private var okCount: Int64 = 0
     private var dirtyCount: Int64 = 0
 
     /// 无脏行。
     public init() {
-        this.dirtyAt = 0
+        this.rule = DirtyRule()
     }
 
     /// 第 dirtyAt 条收到的行判为脏行。
     public init(dirtyAt: Int64) {
-        this.dirtyAt = dirtyAt
+        this.rule = DirtyRule(at: dirtyAt)
     }
 
     public func write(src: Channel): WriteStat {
@@ -67,7 +93,7 @@ public class MemoryWriter <: Writer {
             match (src.recv()) {
                 case Some(_) =>
                     consumed += 1
-                    if (dirtyAt > 0 && consumed == dirtyAt) {
+                    if (rule.isDirty(consumed)) {
                         // 脏行：计入 dirty 并跳过，作业继续
                         dirtyCount += 1
                     } else {
@@ -83,7 +109,7 @@ public class MemoryWriter <: Writer {
 /// 收集型 Writer：除统计外保留写入的行，用于断言「不丢不重」。
 /// 脏行不写入，故 rows() 只含成功行。
 public class CollectingWriter <: Writer {
-    private let dirtyAt: Int64
+    private let rule: DirtyRule
     private let collected: ArrayList<Record>
     private var consumed: Int64 = 0
     private var okCount: Int64 = 0
@@ -91,13 +117,13 @@ public class CollectingWriter <: Writer {
 
     /// 无脏行。
     public init() {
-        this.dirtyAt = 0
+        this.rule = DirtyRule()
         collected = ArrayList<Record>()
     }
 
     /// 第 dirtyAt 条收到的行判为脏行。
     public init(dirtyAt: Int64) {
-        this.dirtyAt = dirtyAt
+        this.rule = DirtyRule(at: dirtyAt)
         collected = ArrayList<Record>()
     }
 
@@ -106,7 +132,7 @@ public class CollectingWriter <: Writer {
             match (src.recv()) {
                 case Some(rec) =>
                     consumed += 1
-                    if (dirtyAt > 0 && consumed == dirtyAt) {
+                    if (rule.isDirty(consumed)) {
                         // 脏行：计入 dirty 并跳过，不写入目标
                         dirtyCount += 1
                     } else {
