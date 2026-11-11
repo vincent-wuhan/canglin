@@ -32,15 +32,25 @@ func testMemoryReaderWriterRoundTrip() {
 
 @Test
 func testReplaceReaderSideOnly() {
-    // 换读侧为 FileMockReader，写侧 MemoryWriter 一行不改
+    // 换读侧为 FileMockReader，写侧 CollectingWriter 一行不改。
+    // 写侧换成「能收集行」的假实现，才谈得上断言到达内容与顺序：
+    // 只断言行数的话，读侧发错内容（乱序、串行、列数不对）照样能过。
     let ch = BoundedChannel(4)
     let reader = FileMockReader(ArrayList<String>(["alpha", "beta", "gamma"]))
-    let writer = MemoryWriter()
+    let writer = CollectingWriter()
     let producer = spawn { reader.read(ch) }
     let stat = writer.write(ch)
     producer.get()
     @Assert(stat.ok == 3)
     @Assert(stat.dirty == 0)
+    @Assert(writer.rows().size == 3)
+    // 到达内容与顺序：每行恰好一列，且依次为 alpha/beta/gamma
+    @Assert(writer.rows()[0].size() == 1)
+    @Assert(writer.rows()[1].size() == 1)
+    @Assert(writer.rows()[2].size() == 1)
+    @Assert(writer.rows()[0].get(0) == Column.Str("alpha"))
+    @Assert(writer.rows()[1].get(0) == Column.Str("beta"))
+    @Assert(writer.rows()[2].get(0) == Column.Str("gamma"))
 }
 
 @Test
@@ -77,6 +87,59 @@ func testDirtyRowCountedAndSkipped() {
     @Assert(stat.dirty == 1)
     @Assert(stat.ok == 9)
     @Assert(stat.ok + stat.dirty == 10)
+}
+
+@Test
+func testCollectingWriterDirtyRowCountedAndSkipped() {
+    // CollectingWriter 的 dirtyAt 分支（PT4 首版无测试锁定的死代码）：
+    // 第 5 行（row-4）判脏 → 计入 dirty、跳过、不落入 rows()，其余行照常写入。
+    let ch = BoundedChannel(4)
+    let reader = MemoryReader(10)
+    let writer = CollectingWriter(5)
+    let producer = spawn { reader.read(ch) }
+    let stat = writer.write(ch)
+    producer.get()
+    @Assert(stat.dirty == 1)
+    @Assert(stat.ok == 9)
+    @Assert(stat.ok + stat.dirty == 10)
+    // 脏行不写入目标：只留 9 行
+    @Assert(writer.rows().size == 9)
+    // 顺序保持且脏行确实缺席：row-3 之后直接是 row-5（不是 row-4）
+    @Assert(writer.rows()[3].get(1) == Column.Str("row-3"))
+    @Assert(writer.rows()[4].get(0) == Column.Long(5))
+    @Assert(writer.rows()[4].get(1) == Column.Str("row-5"))
+}
+
+@Test
+func testDirtyRowBoundaryFirstRow() {
+    // 边界：dirtyAt=1 → 首行即脏
+    let ch = BoundedChannel(4)
+    let reader = MemoryReader(5)
+    let writer = MemoryWriter(1)
+    let producer = spawn { reader.read(ch) }
+    let stat = writer.write(ch)
+    producer.get()
+    @Assert(stat.dirty == 1)
+    @Assert(stat.ok == 4)
+    @Assert(stat.ok + stat.dirty == 5)
+}
+
+@Test
+func testDirtyRowBoundaryLastRow() {
+    // 边界：dirtyAt=总行数 → 末行即脏（写侧收集，可验证末行确实被跳过）
+    let ch = BoundedChannel(4)
+    let reader = MemoryReader(10)
+    let writer = CollectingWriter(10)
+    let producer = spawn { reader.read(ch) }
+    let stat = writer.write(ch)
+    producer.get()
+    @Assert(stat.dirty == 1)
+    @Assert(stat.ok == 9)
+    @Assert(stat.ok + stat.dirty == 10)
+    @Assert(writer.rows().size == 9)
+    // 末行被跳过：最后写入的是第 9 行（row-8），不是 row-9
+    @Assert(writer.rows()[8].get(0) == Column.Long(8))
+    @Assert(writer.rows()[8].get(1) == Column.Str("row-8"))
 }
 
 @Test
