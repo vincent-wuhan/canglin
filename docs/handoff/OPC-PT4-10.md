@@ -17,7 +17,7 @@ canglin（仓廪）= 仓颉版多源数据库客户端（对标 Navicat，信创
 
 ## 环境搭建（实施前必读）
 
-1. **Cangjie SDK 1.0.5 LTS**：Linux x64/aarch64 官方包（268MB）从 https://cangjie-lang.cn/download/1.0.5 下载，解压后 `source <解压目录>/envsetup.sh`。每条 shell 命令都要带 source（shell 状态不跨命令保留）
+1. **Cangjie SDK：基线已升级为 1.1.x STS（2026-11-11 决定）**——从 https://cangjie-lang.cn/download 选 1.1.x STS 正式版（不要用 beta.25）。driver-pg 的限定依赖语法与 stdx.net.tls 依赖 1.1。stdx 从 gitcode `Cangjie/cangjie_stdx` releases 获取（mac/linux 各平台包均有）。构建配方必须脚本化进 env/（cangjie-env.sh 不得硬编码个人 $HOME 路径），保证任意机器可复现。每条 shell 命令都要带 source（shell 状态不跨命令保留）
 2. **Docker 测试矩阵**（PT7-PT10 需要）：`cd env && docker compose up -d`——MySQL8:3306 / PG16:5432 / openGauss:5433，root 密码 canglin123（openGauss: Canglin@123），MySQL 已含 1 万行 src_users 源表。**改过 init SQL 后重置必须 `docker compose down -v`**（匿名卷复用会静默跳过 init）
 3. **镜像拉取**：直连 Docker Hub 可能 EOF，可走 daocloud 镜像（mysql/pg）；opengauss 命名空间 daocloud 不代理，可用 1ms.run，拉完 tag 回官方名。**opengauss:7.0.0-RC3.B025 arm64 是坏镜像**（缺 libopenblas），用 7.0.0-RC1
 
@@ -66,7 +66,9 @@ canglin（仓廪）= 仓颉版多源数据库客户端（对标 Navicat，信创
 
 ## 回报协议
 
-每完成一个 PT：推送 `poc-technical-validation` 分支到双远端，issue 评论附：commit SHA、cjpm test Summary、校准新发现（如有）、concerns。本地 controller 会对每个 commit 做规格符合性 + 质量两阶段审查，审查意见回 issue 评论。
+每完成一个 PT：推送 `poc-technical-validation` 分支到双远端（gitcode + github 都要推），issue 评论附：commit SHA、cjpm test Summary（数字须实跑，不得估算）、校准新发现（如有）、concerns。本地 controller 会对每个 commit 做规格符合性 + 质量两阶段审查，审查意见回 issue 评论。
+
+**提交规范（2026-11-11 起）**：这是对外公开仓，commit message 一律不得携带 AI Co-Authored-By 署名或任何模型标识；单一 commit 必须可独立构建（依赖它的提交不得排在其前）。
 
 ## 明确不做（YAGNI）
 
